@@ -1,0 +1,2750 @@
+---
+title: "MetFlex Analysis Final Version"
+author: "Andrew Perry"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    number_sections: false
+    toc_float: true
+    toc_collapsed: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Diet codes
+
+EU - Energy balance   
+FST - 24-hour fasting   
+CNP - high-carbohydrate   
+BOF - balanced/standard-overfeeding  
+FNP - high-fat overfeeding  
+LPF - low-protein overfeeding    
+HPF - high-protein overfeeding   
+CCC - high-carbohydrate overfeeding (complex carbs diet)   
+CSS - high-carbohydrate overfeeding (fructose diet)   
+CLP - low-protein, high-carbohydrate overfeeding   
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(emmeans)
+library(UpSetR)
+library(Hmisc)
+library(ComplexHeatmap)
+library(XML)
+library(circlize)
+library(RColorBrewer)
+library(gridBase)
+```
+
+# Import data
+
+```{r}
+MetFlexCleanedFile <- "/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Coding/MetFlex_Cleaninig.Rdata"
+phenotypeDataFile <- "/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Data/MetFlex_ds (02-28-2024).xlsx"
+
+load(MetFlexCleanedFile)
+# remove unnecessary DFs
+rm(metabData, MetFlex_Controls, MetFlex_Metabolites, MetFlex_Metabolites_Imputed, imputed, cv.mean.diff.diet, missingness, univariate.check, a, i, lessThan20, min, dataFileInfo)
+
+wb <- XLConnect::loadWorkbook(phenotypeDataFile, password = "ravivenk")
+phenotype.data <- XLConnect::readWorksheet(wb, sheet = "data")
+MetFlexDictionary <- XLConnect::readWorksheet(wb, sheet = "variable info")
+MetFlexMetabAnnotation <- readr::read_csv("/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Coding/hmdb_annotations.csv")
+MetFlex_FFA_wb <- XLConnect::loadWorkbook("/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Data/MetFlex_ds_FFA (02-29-2024).xlsx",
+                                            password = "ravivenk")
+MetFlex_FFA_data <- XLConnect::readWorksheet(MetFlex_FFA_wb, sheet = "QUERY_FOR_EPP ALL HORMONES_0000")
+
+
+
+filesToMd5 <- c(MetFlexCleanedFile,
+                phenotypeDataFile,
+                "/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Coding/hmdb_annotations.csv",
+                "/Users/perry/Library/CloudStorage/OneDrive-VUMC/Research/MetFlex/Data/MetFlex_ds_FFA (02-29-2024).xlsx")
+
+knitr::kable(data.frame(
+  File=basename(filesToMd5),
+  md5=tools::md5sum(filesToMd5)
+))
+
+outputFilesToMd5 <- NULL
+rm(wb, MetFlex_FFA_wb)
+```
+
+
+
+# Fix MetFlex data - change blanks to NA
+
+```{r}
+phenotype.data[,-c(1:6)] <- apply(phenotype.data[,-c(1:6)], 2, as.numeric)
+```
+
+## Change race variable
+
+```{r}
+phenotype.data$Race <- case_when(phenotype.data$Race=="I" ~ "Indian/Native American",
+                                 phenotype.data$Race=="H" ~ "Hispanic",
+                                 phenotype.data$Race=="A" ~ "African/Black",
+                                 phenotype.data$Race=="C" ~ "Caucasian/White")
+```
+
+# Table 1
+
+Drop the leading 0 on the Sample ID in the phenotype data
+
+```{r}
+phenotype.data$NIH <- as.character(as.numeric(phenotype.data$NIH))
+```
+
+```{r}
+# add label information to the phenotype data frame using the dictionary
+for(i in MetFlexDictionary$Variable){
+  label(phenotype.data[[i]]) <- MetFlexDictionary$Info[MetFlexDictionary$Variable==i]
+}
+
+table1data <- phenotype.data %>% 
+              select(NIH, DIET, MRQ) %>%
+              pivot_wider(values_from = MRQ, names_from = DIET, names_prefix = "MRQ_")
+
+table1data <- phenotype.data %>%
+              select(NIH, DIET, M4EE) %>%
+              pivot_wider(values_from = M4EE, names_from = DIET, names_prefix = "M4EE_") %>%
+              right_join(table1data)
+
+table1data <- phenotype.data %>%
+              select(NIH, DIET, CARBOX) %>%
+              pivot_wider(values_from = CARBOX, names_from = DIET, names_prefix = "CARBOX_") %>%
+              right_join(table1data)
+
+table1data <- phenotype.data %>%
+              select(NIH, DIET, LIPOX) %>%
+              pivot_wider(values_from = LIPOX, names_from = DIET, names_prefix = "LIPOX_") %>%
+              right_join(table1data)
+
+table1data <- phenotype.data %>%
+              select(NIH, DIET, PROTOX) %>%
+              pivot_wider(values_from = PROTOX, names_from = DIET, names_prefix = "PROTOX_") %>%
+              right_join(table1data)
+
+table1data <- table1data %>%
+              left_join(phenotype.data %>% filter(DIET=="EU2") %>% select(!any_of(c("MRQ", "M4EE", "CARBOX", "LIPOX", "PROTOX"))))
+
+for(i in unique(phenotype.data$DIET)){
+  label(table1data[[paste0("MRQ_", i)]]) <- paste("24-h Respiratory Quotient during", i)
+  label(table1data[[paste0("M4EE_", i)]]) <- paste("24-h energy expenditure during", i)
+  label(table1data[[paste0("CARBOX_", i)]]) <- paste("24-h carbohydrate oxydation during", i)
+  label(table1data[[paste0("LIPOX_", i)]]) <- paste("24-h lipid oxydation during", i)
+  label(table1data[[paste0("PROTOX_", i)]]) <- paste("24-h protein oxydation during", i)
+}
+
+gtsummary::tbl_summary(table1data, include = !any_of(c("NIH", "DIET", "CH_Date")))
+```
+
+# T test pre and post diet chambers
+
+The data frames generated here will produce the log2FC comparing time B with time A for each metabolite in each diet.
+
+```{r}
+# create metabolite dictionary
+MetFlex_Metabolite_Dictionary <- MetFlex_Metabolites_NoNA %>% select(Compound_ID, Metabolite, HMDB_ID) %>% distinct()
+readr::write_csv(file = "MetFlex_Metabolite_Dictionary.csv", x=MetFlex_Metabolite_Dictionary)
+outputFilesToMd5 <- c(outputFilesToMd5, "MetFlex_Metabolite_Dictionary.csv")
+
+# create log2 transformed values so we can report log2 FC
+MetFlex_Metabolites_NoNA <- MetFlex_Metabolites_NoNA %>% mutate(log2.value = log(Value, base=2))
+
+t.testResult <- tibble(metabolite = character(),
+                       diet = character(),
+                       estimate = double(),
+                       estimate_lower95_CI = double(),
+                       estimate_upper95_CI = double(),
+                       stderr = double(),
+                       pval = double(),
+                       n = double(),
+                       estimate_summary = character())
+
+for(i in unique(MetFlex_Metabolites_NoNA$Metabolite[!is.na(MetFlex_Metabolites_NoNA$Metabolite)])){
+  for(diet in unique(MetFlex_Metabolites_NoNA$Diet_code[!is.na(MetFlex_Metabolites_NoNA$Diet_code)])){
+    temp <- MetFlex_Metabolites_NoNA %>% 
+            select(Sample_ID, Diet_code, Chamber_time, Metabolite, log2.value) %>% 
+            filter(Diet_code==diet & Metabolite==i) %>% 
+            pivot_wider(names_from = Chamber_time, values_from = log2.value)
+    
+    test <- t.test(temp$B, temp$A, alternative = "two.sided", paired = TRUE, na.action = na.omit)
+    
+    t.testResult <- t.testResult %>%
+                    add_row(metabolite = i,
+                            diet = diet,
+                            estimate = test$estimate,
+                            estimate_lower95_CI = test$conf.int[1],
+                            estimate_upper95_CI = test$conf.int[2],
+                            stderr = test$stderr,
+                            pval = test$p.value,
+                            n = nrow(temp),
+                            estimate_summary = paste0(signif(test$estimate, 3),
+                                                     " (",
+                                                     paste(signif(test$conf.int, 3), collapse = ", "),
+                                                     ")")
+                    )
+  }
+}
+
+# FDR correct across diet chambers
+
+t.testResult <- t.testResult %>% mutate(fdr = p.adjust(pval, method="BH"), .by = diet) %>% relocate(fdr, .after = pval)
+
+rm(i, diet, temp, test)
+```
+
+Volcano plots
+
+```{r}
+plot.data <- t.testResult %>%
+              mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                             diet=="FS"~"24-hr fasting",
+                                             diet=="CN"~"High-carbohydrate",
+                                             diet=="FN"~"High-fat",
+                                             diet=="LP"~"Low-protein",
+                                             diet=="HP"~"High-protein",
+                                             diet=="EU"~"Energy balance"))
+
+plot.data <- plot.data %>% mutate(diet.label = factor(diet.label,
+                                                      levels = c("Energy balance",
+                                                                 "24-hr fasting",
+                                                                 "Balanced overfeeding",
+                                                                 "High-fat",
+                                                                 "High-carbohydrate",
+                                                                 "Low-protein",
+                                                                 "High-protein")))
+
+
+ggplot(plot.data, aes(x=estimate, y=-log(pval, base=10))) +
+  geom_point(aes(col=fdr<0.05), size=0.5) +
+  ggsci::scale_color_npg() +
+  ggrepel::geom_text_repel(aes(label=metabolite), size=1.5) + 
+  facet_wrap(~diet.label, scales="free", nrow=1) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  labs(x=expression(log[2]~fold~change),
+       y=expression(-log[10](p)),
+       caption = "T-test on log2 metabolite levels pre- and post-chamber. fdr=BH")
+```
+
+
+Make another figure to show how certain classes of metabolites are changing in the dietary chambers
+
+group things together
+*Glycophsopholipids:*
+  LPCs 
+  PC + PE 
+  SM/Cer
+*Carnitines (arrange by length)*
+  Tri/Diacylglycerols 
+  TG, DG
+Amino acids
+*Ketogenic:*
+  Leucine
+  Lysine
+*Glucogenic/ketogenic:* 
+  Phenylalanine
+  Isoleucine
+  Threonine
+  Tryptophan
+  Tyrosine
+*Glucogenic:*
+  Alanine
+  Arginine
+  Asparagine
+  Aspartic acid
+  Cysteine
+  Glutamic acid
+  Glutamine
+  Glycine
+  Histidine
+  Methionine
+  Proline
+  Serine
+  Valine
+
+```{r}
+
+plot.data <- plot.data %>%
+              left_join(MetFlex_Metabolite_Dictionary, by=c("metabolite"="Metabolite")) %>%
+              left_join(MetFlexMetabAnnotation, by="HMDB_ID") %>%
+              mutate(Change = ifelse(sign(estimate)>0, "Increased", "Decreased"))
+
+
+essential_AA <- c("Histidine",
+                  "Isoleucine",
+                  "Leucine",
+                  "Lysine",
+                  "Methionine",
+                  "Phenylalanine",
+                  "Threonine",
+                  "Tryptophan",
+                  "Valine")
+
+table(essential_AA %in% plot.data$metabolite)
+
+nonEssential_AA <- c("Alanine",
+                     "Arginine",
+                     "Asparagine",
+                     "Aspartic acid",
+                     "Cysteine",
+                     "Glutamine",
+                     "Glutamic acid",
+                     "Glycine",
+                     "Histidine",
+                     "Proline",
+                     "Serine",
+                     "Tyrosine")
+
+table(nonEssential_AA %in% plot.data$metabolite)
+nonEssential_AA[!nonEssential_AA %in% plot.data$metabolite]
+
+LPCs <- unique(plot.data %>% filter(class=="Glycerophospholipids" & (grepl("LPC", metabolite) | grepl("LPE", metabolite))) %>% pull(metabolite))
+PC_PE <- unique(plot.data %>% filter(class=="Glycerophospholipids" & !grepl("LPC", metabolite)) %>% pull(metabolite))
+SM_Cer <- unique(plot.data %>% filter(class=="Sphingolipids" | grepl("Cer", substr(metabolite, 1, 3))) %>% pull(metabolite))
+  
+  
+Carnitines <- unique(plot.data %>% 
+                       filter(direct_parent %in% c("Acyl carnitines")) %>% 
+                       pull(metabolite))
+
+Tri_Diacylglycerols <- unique(plot.data %>% 
+                       filter(direct_parent %in% c("Triacylglycerols") | grepl("DG", metabolite)) %>% 
+                       pull(metabolite))
+
+
+# Amino acids
+
+Ketogenic <- c("Leucine",
+               "Lysine")
+
+table(Ketogenic %in% plot.data$metabolite)
+
+Glucogenic_ketogenic <- c("Phenylalanine",
+                          "Isoleucine",
+                          "Threonine",
+                          "Tryptophan",
+                          "Tyrosine")
+
+table(Glucogenic_ketogenic %in% plot.data$metabolite)
+
+Glucogenic <-c("Alanine",
+               "Arginine",
+               "Asparagine",
+               "Glutamine",
+               "Glycine",
+               "Histidine",
+               "Methionine",
+               "Proline",
+               "Serine",
+               "Valine")
+
+table(Glucogenic %in% plot.data$metabolite)
+               
+plot.data <- plot.data %>%
+              mutate(ravi.class = case_when(metabolite %in% c(LPCs, PC_PE, SM_Cer) ~ "Glycerophospholipids",
+                                            metabolite %in% Carnitines ~ "Carnitines",
+                                            metabolite %in% Tri_Diacylglycerols ~ "Tri/Diacylglycerols",
+                                            metabolite %in% c(Ketogenic, Glucogenic_ketogenic, Glucogenic) ~ "Amino acids"),
+                     ravi.subclass = case_when(metabolite %in% LPCs ~ "LPC/LPEs",
+                                              metabolite %in% PC_PE ~ "PCs and PEs",
+                                              metabolite %in% SM_Cer ~ "Cer/SM",
+                                              metabolite %in% Carnitines ~ "Carnitines",
+                                              metabolite %in% Tri_Diacylglycerols ~ "TG and DG",
+                                              metabolite %in% Ketogenic ~ "Ketogenic",
+                                              metabolite %in% Glucogenic_ketogenic ~ "Glucogenic/ketogenic",
+                                              metabolite %in% Glucogenic ~ "Glucogenic"),
+                     amino_class = case_when(metabolite %in% c(essential_AA, nonEssential_AA) ~ "Amino acids"),
+                     amino_subclass = case_when(metabolite %in% essential_AA ~ "Essential",
+                                                metabolite %in% nonEssential_AA ~ "Non-essential")
+              )
+```
+
+
+```{r, fig.width=11, fig.height=5}
+ravi.class.fc.plot.list <- NULL
+
+col_diet = c("24-hr fasting" = "red",
+             "Energy balance" = "grey",
+             "High-carbohydrate" = "blue",
+             "Balanced overfeeding" = "green3",
+             "High-fat" = "yellow3",
+             "Low-protein" = "purple",
+             "High-protein" = "brown")
+
+
+  
+ravi.class.fc.plot.list[["Carnitines"]] <- ggplot(plot.data %>% filter(ravi.class=="Carnitines"), aes(metabolite, estimate)) +
+  geom_point(aes(col=diet.label, alpha = ifelse(fdr<0.05, 1, 0.5), size=abs(estimate)/2)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_color_manual(values = col_diet) +
+  ggforce::facet_row(facets = vars(ravi.subclass), scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1),
+        strip.background = element_rect(colour="black",
+                                    fill="white")) +
+  labs(title = "Carnitines",
+       y=expression(mean~log[2]~fold~change),
+       x="") +
+  guides(col = guide_legend(title = "Diet"),
+         alpha = FALSE,
+         size = FALSE)
+
+ravi.class.fc.plot.list[["Glycerophospholipids"]] <- ggplot(plot.data %>% filter(ravi.class=="Glycerophospholipids"), aes(metabolite, estimate)) +
+  geom_point(aes(col=diet.label, alpha = ifelse(fdr<0.05, 1, 0.5), size=abs(estimate)/2)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_color_manual(values = col_diet) +
+  ggforce::facet_row(facets = vars(ravi.subclass), scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1),
+        strip.background = element_rect(colour="black",
+                                    fill="white")) +
+  labs(title = "Glycerophospholipids",
+       y=expression(mean~log[2]~fold~change),
+       x="") +
+  guides(col = guide_legend(title = "Diet"),
+         alpha = FALSE,
+         size = FALSE)
+
+
+ravi.class.fc.plot.list[["Tri/Diacylglycerols"]] <- ggplot(plot.data %>% filter(ravi.class=="Tri/Diacylglycerols"), aes(metabolite, estimate)) +
+  geom_point(aes(col=diet.label, alpha = ifelse(fdr<0.05, 1, 0.5), size=abs(estimate)/2)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_color_manual(values = col_diet) +
+  ggforce::facet_row(facets = vars(ravi.subclass), scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1),
+        strip.background = element_rect(colour="black",
+                                    fill="white")) +
+  labs(title = "Tri- and diacylglycerols",
+       y=expression(mean~log[2]~fold~change),
+       x="") +
+  guides(col = guide_legend(title = "Diet"),
+         alpha = FALSE,
+         size = FALSE)
+
+ravi.class.fc.plot.list[["Amino acids"]] <- ggplot(plot.data %>% filter(ravi.class=="Amino acids"), aes(metabolite, estimate)) +
+  geom_point(aes(col=diet.label, alpha = ifelse(fdr<0.05, 1, 0.5), size=abs(estimate)/2)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_color_manual(values = col_diet) +
+  ggforce::facet_row(facets = vars(ravi.subclass), scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1),
+        strip.background = element_rect(colour="black",
+                                    fill="white")) +
+  labs(title = "Amino acids",
+       y=expression(mean~log[2]~fold~change),
+       x="") +
+  guides(col = guide_legend(title = "Diet"),
+         alpha = FALSE,
+         size = FALSE)
+
+
+ravi.class.fc.plot.list
+```
+
+```{r}
+p1 <- ggpubr::ggarrange(plotlist = ravi.class.fc.plot.list[setdiff(names(ravi.class.fc.plot.list), "Glycerophospholipids")],
+                  nrow = 1,
+                  align = "hv",
+                  widths = c(4, 1, 3),
+                  common.legend = TRUE)
+
+p2 <- ravi.class.fc.plot.list[["Glycerophospholipids"]] + theme(legend.position = "none")
+
+p2
+
+ggpubr::ggarrange(p1, p2,
+                  nrow = 2,
+                  common.legend = FALSE)
+
+ggsave("ravi.class.fc.plot.list2.pdf", width = 20, height = 15)
+
+rm(p1, p2)
+```
+
+Create the amino acids, essential vs non essential figure
+```{r}
+ggplot(plot.data %>% filter(amino_class=="Amino acids"), aes(metabolite, estimate)) +
+  geom_point(aes(col=diet.label, alpha = ifelse(fdr<0.05, 1, 0.5), size=abs(estimate)/2)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  scale_color_manual(values = col_diet) +
+  ggforce::facet_row(facets = vars(amino_subclass), scales = "free", space = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1),
+        strip.background = element_rect(colour="black",
+                                    fill="white")) +
+  labs(title = "Amino acids",
+       y=expression(mean~log[2]~fold~change),
+       x="") +
+  guides(col = guide_legend(title = "Diet"),
+         alpha = FALSE,
+         size = FALSE)
+ggsave("ravi.class.essential_v_non_AA.pdf", height = 7, width = 7)
+```
+
+
+
+
+Make a stacked bar plot of the classes of metabolites that change in t tests
+
+```{r}
+# add in sphingomyelin class and separate out amino acids from carboxlyic acids and derivatives
+plot.data <- plot.data %>% mutate(class = case_when(class=="Carboxylic acids and derivatives" ~ sub_class,
+                                       .default = class))
+
+plotting.classes <- plot.data %>% select(metabolite, Compound_ID, HMDB_ID, direct_parent, kingdom, super_class, class, sub_class) %>% distinct()
+
+new <- plot.data %>% summarise(fdr.sig = sum(fdr<0.05), .by=c("diet", "class", "Change"))
+
+
+
+new <- new %>% mutate(sum.fdr.sig = sum(fdr.sig), .by="class")
+
+class.rank <- new %>% select(class, sum.fdr.sig) %>% distinct() %>% drop_na() %>% mutate(rank.sum.fdr.sig = rank(desc(sum.fdr.sig))) %>% arrange(rank.sum.fdr.sig)
+top5classes <- class.rank %>% filter(rank.sum.fdr.sig<6) %>% pull(class)
+
+# we want to colorize the top 5 classes that change, call the rest "other"
+new <- new %>% mutate(new.class = case_when(!class %in% c(top5classes, "Sphingolipids") ~ "Other",
+                                            .default = class))
+
+plotting.classes <- plotting.classes %>% mutate(new.class = case_when(!class %in% c(top5classes, "Sphingolipids") ~ "Other",
+                                            .default = class))
+
+# now add in the data for metabolites that did NOT change
+unchanged <- plot.data %>% summarise(fdr.sig = sum(fdr<0.05), .by=c("diet", "class", "Change")) %>% mutate(new.class = "FDR>0.05")
+new <- new %>% bind_rows(unchanged)
+
+# add diet labels
+new <- new %>% mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                               diet=="FS"~"24-hr fasting",
+                                               diet=="CN"~"High-carbohydrate",
+                                               diet=="FN"~"High-fat",
+                                               diet=="LP"~"Low-protein",
+                                               diet=="HP"~"High-protein",
+                                             diet=="EU" ~ "Energy balance"))
+
+new$new.class <- factor(new$new.class,
+                        levels = c(top5classes, "Other", "FDR>0.05"))
+
+
+new <- new %>% mutate(diet.label = factor(diet.label, levels = c("High-protein",
+                                                                 "Low-protein",
+                                                                 "High-carbohydrate",
+                                                                 "High-fat",
+                                                                 "Balanced overfeeding",
+                                                                 "24-hr fasting",
+                                                                 "Energy balance")))
+
+
+metabolite.class.colors <- c("Glycerophospholipids" = "firebrick",
+                             "Amino acids, peptides, and analogues" = "royalblue",
+                             "Fatty Acyls" = "green3",
+                             "Sphingolipids" = "purple2",
+                             "Organonitrogen compounds" = "darkorange",
+                             "Other" = "darkblue",
+                             "FDR>0.05" = "grey")
+
+
+decrease <- ggplot(new %>% filter(Change=="Decreased"), aes(y=diet.label, x=fdr.sig)) +
+  geom_col(aes(fill=new.class)) +
+  xlim(250,0) +
+  scale_fill_manual(values = metabolite.class.colors) +
+  theme_bw() +
+  # facet_wrap(~Change, ncol = 1) +
+  scale_y_discrete(position = "right") +
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 270, vjust = 0, hjust = 1)) +
+  labs(y="",
+       x="Number decreased") +
+  guides(fill = guide_legend(title="Metabolite class"))
+  
+
+decrease
+
+increase <- ggplot(new %>% filter(Change=="Increased"), aes(y=diet.label, x=fdr.sig)) +
+  geom_col(aes(fill=new.class)) +
+  scale_fill_manual(values = metabolite.class.colors) +
+  theme_bw() +
+  # facet_wrap(~Change, ncol = 1) +
+  scale_y_discrete(position = "left") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0, hjust = 1),
+        axis.text.y = element_text(hjust = 0.5)) +
+  labs(y="",
+       x="Number increased") +
+  guides(fill = guide_legend(title="Metabolite class"))
+
+increase
+
+legend <- cowplot::get_legend(increase)
+# 
+# # remove legends
+# # decrease <- decrease + theme(legend.position="none")
+# # increase <- increase + theme(legend.position="none")
+# 
+# p1_grob <- ggplotGrob(increase)
+# p2_grob <- ggplotGrob(legend)
+# p3_grob <- ggplotGrob(decrease)
+# 
+# layout <- rbind(c(1, 2),
+#                 c(3, 2))
+# finalGrob <- gridExtra::grid.arrange(p1_grob, NA, p3_grob, layout_matrix=layout)
+# grid.draw(finalGrob)
+
+
+ggpubr::ggarrange(decrease, increase, ncol=3, nrow=1, widths = c(1,1.4), common.legend = TRUE, legend="right")
+
+ggsave("tTestIncreaseDecrease.pdf", height=3, width = 10)
+
+rm(increase, decrease, legend, new, class.rank, top5classes, unchanged)
+```
+
+
+Compare fold changes across dietary chambers
+
+```{r, fig.width=10, fig.height=10}
+plot.data <- t.testResult %>% 
+             mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                               diet=="FS"~"24-hr fasting",
+                                               diet=="CN"~"High-carbohydrate",
+                                               diet=="FN"~"High-fat",
+                                               diet=="LP"~"Low-protein",
+                                               diet=="HP"~"High-protein",
+                                             diet=="EU" ~ "Energy balance")) %>%
+             left_join(plotting.classes)
+
+cols.to.plot <- unique(plot.data$diet.label)
+
+plot.data <- plot.data %>% select(!any_of(c("diet",
+                            "estimate_lower95_CI",
+                            "estimate_upper95_CI",
+                            "stderr",
+                            "pval",
+                            "fdr",
+                            "n",
+                            "estimate_summary"))) %>% pivot_wider(names_from = diet.label, values_from = estimate)
+
+test <- reshape2::melt(plot.data[,c("metabolite", "new.class", cols.to.plot)])
+test1 <- test
+test2 <- merge(test, test1, by=c("metabolite", "new.class"))
+
+ggplot(test2, aes(value.x, value.y)) +
+  geom_point(aes(col = new.class), size=0.8) +
+  scale_color_manual(values=metabolite.class.colors) +
+  facet_grid(variable.x ~ variable.y, scales = "free") +
+  ggpubr::stat_cor(method="spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  theme(strip.background = element_rect(fill="white", colour = "black"),
+        legend.position = "bottom") +
+  labs(x=expression(log[2]~fold~change~metabolite),
+       y=expression(log[2]~fold~change~metabolite)) +
+  guides(color = guide_legend(title = "Metabolite class"))
+ggsave("log2fc_diet_compare_w_classes.pdf", height = 20, width = 20)
+
+rm(test, test1, test2)
+```
+
+summarize this in with a correlation heatmap
+
+```{r}
+cor.mat <- cor(plot.data[,cols.to.plot], method = "spearman")
+
+cor.mat <- reshape2::melt(cor.mat, value.name = "rho")
+
+p.mat <- ggcorrplot::cor_pmat(plot.data[,cols.to.plot], method = "spearman")
+
+p.mat <- reshape2::melt(p.mat, value.name = "pval")
+
+tmp.plot.data <- cor.mat %>% 
+              left_join(p.mat) %>% 
+              mutate(rho = case_when(Var1==Var2 ~ NA,
+                                     .default = rho)) %>%
+              mutate(rho_p = case_when(pval<0.05 & !is.na(rho)~ paste0(round(rho,3), "*"),
+                                       pval>=0.05 ~ as.character(round(rho,3))))
+
+
+ggplot(tmp.plot.data %>% filter(!duplicated(rho)), aes(Var2, Var1)) +
+  geom_tile(aes(fill = rho)) +
+  geom_text(aes(label = rho_p)) +
+  scale_fill_gradient2(high = "firebrick", low = "royalblue", name = expression(Spearman~rho), na.value = NA) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+  labs(x="",
+       y="") 
+ggsave("meanlog2fc_corr_heatmap.pdf", height = 4, width=6)
+
+rm(cor.mat, p.mat, tmp.plot.data, cols.to.plot)
+```
+
+Plot a few examples from this heatmap
+
+```{r}
+plot.data <- plot.data %>% left_join(plotting.classes %>% select(metabolite, new.class))
+
+p1 <- ggplot(plot.data, aes(`Energy balance`, `24-hr fasting`)) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  labs(x=expression(mean~log[2]~fold~change~energy~balance~chamber),
+       y=expression(mean~log[2]~fold~change~24-hr~fasting~chamber)) +
+  guides(col=guide_legend(title = "Metabolite class"))
+
+p1
+
+p2 <- ggplot(plot.data, aes(`High-fat`, `24-hr fasting`)) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  labs(x=expression(mean~log[2]~fold~change~high-fat~chamber),
+       y=expression(mean~log[2]~fold~change~24-hr~fasting~chamber)) +
+  guides(col=guide_legend(title = "Metabolite class"))
+
+p2
+
+p3 <- ggplot(plot.data, aes(`High-fat`, `High-carbohydrate`)) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho", label.x.npc = "left", label.y.npc = "bottom",) +
+  theme_bw() +
+  labs(x=expression(mean~log[2]~fold~change~high-fat~chamber),
+       y=expression(mean~log[2]~fold~change~high-carbohydrate~chamber)) +
+  guides(col=guide_legend(title = "Metabolite class"))
+
+p3
+
+p4 <- ggplot(plot.data, aes(`Energy balance`, `High-carbohydrate`)) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho", label.x.npc = "left", label.y.npc = "bottom",) +
+  theme_bw() +
+  labs(x=expression(mean~log[2]~fold~change~energy~balance~chamber),
+       y=expression(mean~log[2]~fold~change~high-carbohydrate~chamber)) +
+  guides(col=guide_legend(title = "Metabolite class"))
+
+p4
+
+ggpubr::ggarrange(p1, p2, p3, p4, nrow=1, common.legend = TRUE, legend="right") 
+ggsave("meanlog2fc_corr_examples.pdf", width = 20, height = 4)
+
+rm(p1, p2, p3, p4)
+```
+
+
+Remake the t-test volcano plot colorized by metabolite class
+```{r}
+plot.data <- t.testResult %>%
+              mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                             diet=="FS"~"24-hr fasting",
+                                             diet=="CN"~"High-carbohydrate",
+                                             diet=="FN"~"High-fat",
+                                             diet=="LP"~"Low-protein",
+                                             diet=="HP"~"High-protein",
+                                             diet=="EU"~"Energy balance"))
+
+plot.data <- plot.data %>% mutate(diet.label = factor(diet.label,
+                                                      levels = c("Energy balance",
+                                                                 "24-hr fasting",
+                                                                 "Balanced overfeeding",
+                                                                 "High-fat",
+                                                                 "High-carbohydrate",
+                                                                 "Low-protein",
+                                                                 "High-protein")))
+
+plot.data <- plot.data %>% left_join(plotting.classes, by="metabolite")
+
+
+ggplot(plot.data %>% filter(diet %in% c("FS", "CN", "FN")), aes(x=estimate, y=-log(pval, base=10))) +
+  geom_point(aes(col=new.class), size=0.5) +
+  scale_color_manual(values=metabolite.class.colors) +
+  ggrepel::geom_text_repel(aes(label=metabolite), size=1.5) + 
+  geom_hline(yintercept = -log(max(plot.data$pval[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+  facet_wrap(~diet.label, scales="free", nrow=1) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  labs(x=expression(log[2]~fold~change),
+       y=expression(-log[10](p~value)),
+       caption = "T-test on log2 metabolite levels pre- and post-chamber. fdr=BH") +
+  guides(col=guide_legend(title="Metabolite class"))
+ggsave("t_test_volcano_pub.pdf", height = 6, width = 10, device = "pdf")
+
+
+ggplot(plot.data, aes(x=estimate, y=-log(pval, base=10))) +
+  geom_point(aes(col=new.class), size=0.5) +
+  scale_color_manual(values=metabolite.class.colors) +
+  ggrepel::geom_text_repel(aes(label=metabolite), size=1.5) + 
+  geom_hline(yintercept = -log(max(plot.data$pval[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+  facet_wrap(~diet.label, scales="free", nrow=2) +
+  theme_bw() +
+  theme(legend.position = "right",
+        strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  labs(x=expression(log[2]~fold~change),
+       y=expression(-log[10](p~value)),
+       caption = "T-test on log2 metabolite levels pre- and post-chamber. fdr=BH") +
+  guides(col=guide_legend(title="Metabolite class"))
+ggsave("t_test_volcano_full.pdf", height = 12, width = 18, device = "pdf")
+```
+
+Save T-test results to csv
+
+```{r}
+tmp <- plot.data %>%
+        select(diet.label, metabolite, HMDB_ID, estimate, stderr, pval, fdr, n, kingdom, super_class, class, sub_class, direct_parent, new.class) %>%
+        rename(Diet_chamber = diet.label,
+               plotting_class = new.class)
+
+readr::write_csv(tmp, "MetFlex_tTest_results.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "MetFlex_tTest_results.csv")
+
+rm(tmp)
+```
+
+
+
+# Mixed model approach to effect of diet on metabolite changes
+
+Here we assume that there is a *fixed* effect from the diet.
+
+We also assume there is a *random* effect (or random intercept) for each participant. This accounts for the study design wherein participants traversed diet chambers in different orders. However, that is not to say each participant has a unique sequence of chambers. Some participants traversed the study with the same order of diet chambers.
+
+```{r}
+temp <- MetFlex_Metabolites_NoNA %>% select(Sample_ID, Diet_code, Chamber_order) %>% distinct()
+
+Chamber_sequence = NULL
+
+for(p in unique(temp$Sample_ID)) {
+  Chamber_sequence[[p]] <- paste(temp %>% filter(Sample_ID==p) %>% arrange(Chamber_order) %>% pull(Diet_code), collapse = "_")
+}
+
+Chamber_sequence <- as.data.frame(cbind(Chamber_sequence)) %>% rownames_to_column(var="Sample_ID")
+Chamber_sequence$Chamber_sequence <- unlist(Chamber_sequence$Chamber_sequence)
+
+knitr::kable(Chamber_sequence %>% arrange(Chamber_sequence))
+
+table(duplicated(Chamber_sequence$Chamber_sequence), exclude = NULL)
+
+rm(temp, p)
+```
+
+
+table how many participants did how many chambers
+
+```{r}
+knitr::kable(table(MetFlex_Metabolites_NoNA %>% select(Sample_ID, `Sub-test_code`) %>% distinct() %>% pull(`Sub-test_code`)))
+```
+
+
+
+```{r}
+dataForModels <- MetFlex_Metabolites_NoNA %>% 
+                  select(Sample_ID, Diet_code, Compound_ID, Chamber_time, Chamber_order, log2.Value) %>% 
+                  pivot_wider(names_from = c(Compound_ID, Chamber_time), names_sep = "_", values_from = log2.Value)
+
+dataForModels$Diet_code <- as.factor(dataForModels$Diet_code)
+dataForModels$Diet_code <- relevel(dataForModels$Diet_code, ref="EU")
+
+dataForModels <- dataForModels %>% 
+                  left_join(phenotype.data %>% select(NIH, AGE, MALE, Race, BMI) %>% distinct(NIH, .keep_all=TRUE), by=c("Sample_ID"="NIH")) %>% 
+                  relocate(AGE, MALE, Race, BMI, .after=Sample_ID)
+
+table(duplicated(dataForModels[,c("Sample_ID","Diet_code")]))
+
+dataForModels <- dataForModels %>% 
+                  left_join(Chamber_sequence) %>% 
+                  relocate(Chamber_sequence, .after=Chamber_order)
+dataForModels$Chamber_sequence <- as.factor(dataForModels$Chamber_sequence)
+```
+
+We are missing covariate information on some participants.
+
+
+```{r}
+dataForModels %>% select(Sample_ID, AGE, MALE, Race, BMI) %>% distinct() %>% filter(is.na(AGE) | is.na(MALE) | is.na(Race) | is.na(BMI))
+
+dataForModels %>% select(Sample_ID, AGE, MALE, Race, BMI) %>% distinct() %>% filter(is.na(AGE) | is.na(MALE) | is.na(Race) | is.na(BMI)) %>% pull(Sample_ID)
+```
+
+
+
+My main analysis includes a random effect for participant. If you include a hierarchical random effect for Chamber_sequence and Sample_ID (the lmer term would be (1 | Chamber_sequence/Sample_ID)) I get the exact same model results (those results are not included in the current code).
+
+I have included an lmer model here with adjustments for age/sex/race/BMI but that should not be necessary as these are all paired measurements.
+
+model: post-chamber level ~ pre-chamber level + diet + Chamber_order + random effect per participant.  
+
+Our term of interest is the beta coefficient on the diet variable. This will tell us what is the expected difference in log2 values of the post-chamber metabolite level for a given diet (FST, BO etc.) compared to the EU chamber, at any given pre-chamber metabolite level. As individual participant characteristics (such as obesity) and study design (chamber sequence) may impact the pre-chamber metabolite level, the random effect per participant should allow the model to be flexible around those differences.
+
+```{r}
+nmle.results <- NULL
+
+dataForModels$Chamber_order <- as.factor(dataForModels$Chamber_order)
+
+for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+  pre <- paste0(m, "_A")
+  post <- paste0(m, "_B")
+  
+  tmp1 <- subset(dataForModels, select = c("Sample_ID", "Diet_code", "Chamber_order", pre , post))
+  table(duplicated(tmp1[, c(1, 2)]))
+  tmp1$dup <- duplicated(tmp1[, c(1, 2)])
+  tmp1 <- subset(tmp1, dup=="FALSE")
+  tmp1$Chamber_order <- factor(tmp1$Chamber_order)
+  tmp1 <- tmp1[complete.cases(tmp1), ] #missing is OK for lmer. Need specify na.action=na.exclude for lme.
+  
+  # model 1: post-chamber level ~ pre-chamber level + diet + Chamber_order + random effect per participant.
+  # the interaction term is an approximation to account for carryover effects.
+  fmla <- as.formula(paste(post, "~", pre, "+ Diet_code + Chamber_order + (1 | Sample_ID)"))
+  
+  M <- model.matrix(as.formula(paste(post, "~", pre, "+ Diet_code + Chamber_order")),
+                    data = tmp1)
+  dim(M)
+  k <- caret::findLinearCombos(M)
+  
+  correlationsRemovedData <- data.frame(Sample_ID = tmp1$Sample_ID,
+                                        M[,-c(1, 2, k$remove)])
+  
+  correlationsRemovedData[[pre]] <- tmp1[[pre]]
+  correlationsRemovedData[[post]] <- tmp1[[post]]
+  
+  fmla <- as.formula(paste(post, "~", paste(colnames(M[,-c(1, k$remove)]),collapse="+ " )))
+  
+  cs_model <- nlme::lme(fmla , random = ~ 1 | Sample_ID,
+                        correlation=nlme::corCompSymm(), # compound symmetry
+                        data=correlationsRemovedData,
+                        control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+  cs_model.sum <- summary(cs_model)
+  
+  # ICC
+  variance <- nlme::VarCorr(cs_model)
+  var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+  var_total <- as.numeric(variance[1:nrow(variance)])
+  icc.cs <- sum(var_between)/sum(var_total)
+   
+   
+  un_model <- nlme::lme(fmla , random = ~ 1 | Sample_ID,
+                        correlation=nlme::corSymm(), # unstructured
+                        data=correlationsRemovedData,
+                        control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+  un_model.sum <- summary(un_model)
+  
+  # ICC
+  variance <- nlme::VarCorr(un_model)
+  var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+  var_total <- as.numeric(variance[1:nrow(variance)])
+  icc.un <- sum(var_between)/sum(var_total)
+  
+  
+  nmle.results <- nmle.results %>% 
+                    bind_rows(as.data.frame(summary(cs_model)$tTable) %>% 
+                                rownames_to_column(var="Term") %>% 
+                                mutate(Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                       Adjustments = "Unadjusted",
+                                       n = nobs(cs_model),
+                                       cov_str = "CS",
+                                       AIC = AIC(cs_model),
+                                       BIC = BIC(cs_model),
+                                       ICC = icc.cs) %>%
+                                relocate(Metabolite, .before = everything())
+                              )
+  
+  nmle.results <- nmle.results %>% 
+                    bind_rows(as.data.frame(summary(un_model)$tTable) %>% 
+                                rownames_to_column(var="Term") %>% 
+                                mutate(Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                       Adjustments = "Unadjusted",
+                                       n = nobs(un_model),
+                                       cov_str = "UN",
+                                       AIC = AIC(un_model),
+                                       BIC = BIC(un_model),
+                                       ICC = icc.un) %>%
+                                relocate(Metabolite, .before = everything())
+                              )
+}
+
+rm(m, pre, post, fmla, tmp1, M, k, correlationsRemovedData, cs_model, cs_model.sum, un_model, un_model.sum,
+   variance, var_between, var_total, icc.cs, icc.un)
+```
+
+Compare ICC
+```{r}
+rmarkdown::paged_table(nmle.results %>% select(Metabolite, cov_str, ICC) %>% distinct() %>% arrange(ICC))
+
+ggplot(nmle.results %>% select(Metabolite, cov_str, ICC) %>% distinct(), aes(x=ICC, fill=cov_str)) +
+  geom_histogram(position = "identity", alpha=0.4) +
+  theme_bw()
+```
+
+
+Compare AIC and BIC between compound symmetry and unstructured lme models
+```{r}
+nmle.results %>% select(Metabolite, cov_str, AIC, BIC) %>% distinct() %>% summarise(mean_AIC = mean(AIC), mean_BIC = mean(BIC), .by=cov_str)
+
+ggplot(nmle.results %>% select(Metabolite, cov_str, AIC, BIC) %>% distinct(), aes(x=AIC, fill=cov_str)) +
+  geom_histogram(position = "identity", alpha=0.4) +
+  theme_bw()
+
+ggplot(nmle.results %>% select(Metabolite, cov_str, AIC, BIC) %>% distinct(), aes(x=BIC, fill=cov_str)) +
+  geom_histogram(position = "identity", alpha=0.4) +
+  theme_bw()
+
+test <- nmle.results %>% select(Metabolite, cov_str, AIC) %>% distinct() %>% pivot_wider(names_from = cov_str, values_from = AIC)
+wilcox.test(test$CS, test$UN, paired = TRUE)
+
+test <- nmle.results %>% select(Metabolite, cov_str, BIC) %>% distinct() %>% pivot_wider(names_from = cov_str, values_from = BIC)
+wilcox.test(test$CS, test$UN, paired = TRUE)
+
+rm(test)
+```
+
+
+Compare result to t-test
+
+```{r, fig.width=9, fig.height=6}
+diets <- c("FS", "CN", "FN", "BO", "LP", "HP")
+
+temp <- nmle.results %>% filter(Adjustments=="Unadjusted" & cov_str=="CS" & Term %in% paste0("Diet_code", diets)) %>%
+        mutate(Term = gsub("Diet_code", "", Term)) %>%
+        mutate(nlme.fdr = p.adjust(`p-value`, method="BH"), .by="Term") %>%
+        rename(beta = Value) %>%
+        relocate(nlme.fdr, .after = `p-value`)
+
+compare <- temp %>% 
+            left_join(t.testResult %>% select(metabolite, diet, estimate, pval, fdr), by=c("Metabolite"="metabolite", "Term"="diet"))
+
+# add in diet labels
+compare <- compare %>% mutate(diet.label = case_when(Term=="CN" ~ "High-carbohydrate",
+                                                     Term=="FN" ~ "High-fat",
+                                                     Term=="FS" ~ "Fasting",
+                                                     Term=="BO" ~ "Balanced overfeeding",
+                                                     Term=="LP" ~ "Low-protein",
+                                                     Term=="HP" ~ "High-protein"))
+
+# Venk requested a comparison of FDR<5% from the t.test and from the lmer
+table(compare$nlme.fdr<0.05, compare$fdr<0.05, compare$Term, exclude = NULL)
+
+ggplot(compare, aes(beta, estimate)) +
+  geom_point(aes(color=nlme.fdr<0.05), size=0.5) +
+  facet_wrap(.~diet.label, scales = "free") +
+  geom_abline(slope=1, color="black", linetype="dashed") +
+  theme_bw() +
+  ggsci::scale_color_npg() +
+  ggrepel::geom_text_repel(aes(label = Metabolite), color="black", size=2) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  labs(x=expression(log[2]~fold~change~from~linear~mixed~model~(with~energy~balance~diet~as~referent)),
+       y=expression(log[2]~fold~change~from~t-test),
+       caption = "model: post-chamber metabolite level ~ pre-chamber metabolite level + diet + Chamber_order + diet*Chamber_order + random effect per participant.\nvar-cov structure is compound symmetry") +
+  guides(color=guide_legend(title = "FDR<5% from linear mixed model")) +
+  theme(legend.position = "bottom",
+        strip.background=element_rect(colour="black",
+                                    fill="white"))
+ggsave("FC_compared_EU_nlme_CS.pdf", height = 7, width = 11, device = "pdf")
+```
+
+Save nlme results to csv
+```{r}
+tmp <- compare %>%
+        select(Metabolite, diet.label, beta, Std.Error, `t-value`, `p-value`, nlme.fdr) %>%
+        rename(Diet = diet.label,
+               fdr = nlme.fdr)
+
+readr::write_csv(tmp, "nlme_diet_predict_log2fc.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "nlme_diet_predict_log2fc.csv")
+
+rm(temp, tmp, compare)
+```
+
+
+
+# Spaghetti plots of respiratory quotient from diets
+
+```{r, fig.width=7, fig.height=3}
+temp <- phenotype.data %>% select(NIH, DIET, MRQ) %>%
+        mutate(MRQ = as.numeric(MRQ))
+
+eu.MRQ <- temp %>% filter(DIET=="EU2") %>% rename(EU.MRQ = MRQ) %>% select(!DIET)
+
+temp <- temp %>% filter(DIET!="EU2") %>% left_join(eu.MRQ)
+temp <- temp %>% mutate(diet.label = case_when(DIET=="BOF"~"Balanced overfeeding",
+                                               DIET=="FST"~"24-hr fasting",
+                                               DIET=="CNP"~"High-carbohydrate",
+                                               DIET=="FNP"~"High-fat",
+                                               DIET=="LPF"~"Low-protein",
+                                               DIET=="HPF"~"High-protein"))
+
+temp <- temp %>% pivot_longer(contains("MRQ"), names_to = "MRQ.type", values_to = "MRQ")
+
+ggplot(temp, aes(x=MRQ.type, y=MRQ)) +
+  geom_point() +
+  geom_line(aes(group=NIH), alpha=0.2, col="black") + 
+  facet_wrap(~diet.label, nrow = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+# check to ensure that the EU.MRQ is the same across diets for each participant by checking the distribution of the standard deviations.
+temp %>% summarise(mrq.sum = sd(MRQ, na.rm=TRUE),
+                   .by=c("NIH", "MRQ.type")) %>% 
+          summarise(mean_of_SDs = mean(mrq.sum, na.rm = TRUE),
+                    range_of_SDs = range(mrq.sum, na.rm = TRUE),
+                    .by=MRQ.type)
+
+plot.data <- temp %>% mutate(MRQ.type = case_when(MRQ.type == "MRQ" ~ "Chamber",
+                                                  MRQ.type == "EU.MRQ" ~ "Energy balance chamber"),
+                             physiology = "Respiratory quotient") %>%
+              rename(value = MRQ,
+                     chamber = MRQ.type)
+
+rm(temp, eu.MRQ)
+```
+
+# Spaghetti plots of EE from diets
+
+```{r, fig.width=7, fig.height=3}
+temp <- phenotype.data %>% select(NIH, DIET, M4EE) %>%
+        mutate(M4EE = as.numeric(M4EE))
+
+eu.M4EE <- temp %>% filter(DIET=="EU2") %>% rename(EU.M4EE = M4EE) %>% select(!DIET)
+
+temp <- temp %>% filter(DIET!="EU2") %>% left_join(eu.M4EE)
+temp <- temp %>% mutate(diet.label = case_when(DIET=="BOF"~"Balanced overfeeding",
+                                               DIET=="FST"~"24-hr fasting",
+                                               DIET=="CNP"~"High-carbohydrate",
+                                               DIET=="FNP"~"High-fat",
+                                               DIET=="LPF"~"Low-protein",
+                                               DIET=="HPF"~"High-protein"))
+
+temp <- temp %>% pivot_longer(contains("M4EE"), names_to = "M4EE.type", values_to = "M4EE")
+
+ggplot(temp, aes(x=M4EE.type, y=M4EE)) +
+  geom_point() +
+  geom_line(aes(group=NIH), alpha=0.2) + 
+  facet_wrap(~diet.label, nrow = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+plot.data <- plot.data %>% bind_rows(
+              temp %>% mutate(M4EE.type = case_when(M4EE.type == "M4EE" ~ "Chamber",
+                                                  M4EE.type == "EU.M4EE" ~ "Energy balance chamber"),
+                             physiology = "Energy expenditure") %>%
+              rename(value = M4EE,
+                     chamber = M4EE.type)
+)
+
+rmarkdown::paged_table(temp %>% filter(M4EE.type=="EU.M4EE") %>% arrange(desc(M4EE)))
+
+rm(temp, eu.M4EE)
+```
+
+
+# Spaghetti plots of oxidation from diets
+
+```{r, fig.width=9, fig.height=6}
+temp <- phenotype.data %>% select(NIH, DIET, contains("OX")) %>% 
+        mutate(PROTOX = as.numeric(PROTOX),
+               CARBOX = as.numeric(CARBOX),
+               LIPOX = as.numeric(LIPOX)) %>%
+        pivot_longer(cols = contains("OX"), names_to = "Oxidation", values_to = "Oxidation.value")
+
+eu.ox <- temp %>% filter(DIET=="EU2") %>% rename(EU.Oxidation.value = Oxidation.value) %>% select(!DIET)
+temp <- temp %>% left_join(eu.ox) %>% pivot_longer(cols = contains("Oxidation.value"), values_to = "oxidation", names_to = "Diet_sub")
+temp <- temp %>% mutate(diet.label = case_when(DIET=="BOF"~"Balanced overfeeding",
+                                               DIET=="FST"~"24-hr fasting",
+                                               DIET=="CNP"~"High-carbohydrate",
+                                               DIET=="FNP"~"High-fat",
+                                               DIET=="LPF"~"Low-protein",
+                                               DIET=="HPF"~"High-protein"))
+
+plot.data <- plot.data %>% bind_rows(
+              temp %>% mutate(Diet_sub = case_when(Diet_sub == "Oxidation.value" ~ "Chamber",
+                                                  Diet_sub == "EU.Oxidation.value" ~ "Energy balance chamber")) %>%
+              rename(value = oxidation,
+                     chamber = Diet_sub,
+                     physiology = Oxidation) %>%
+              mutate(physiology = case_when(physiology=="PROTOX" ~ "Protein oxidation",
+                                            physiology=="LIPOX" ~ "Lipid oxidation",
+                                            physiology=="CARBOX" ~ "Carbohydrate oxidation"))
+)
+
+RQ <- phenotype.data %>% select(NIH, DIET, MRQ)
+EU.RQ <- RQ %>% filter(DIET=="EU2") %>% rename(EU.MRQ = MRQ) %>% select(!DIET)
+RQ <- RQ %>% filter(!DIET=="EU2") %>% left_join(EU.RQ, by="NIH") %>% mutate(delta.MRQ = MRQ-EU.MRQ)
+
+temp <- temp %>% left_join(RQ)
+
+ggplot(temp %>% filter(!DIET=="EU2"), aes(x=Diet_sub, y=oxidation, color=delta.MRQ)) +
+  geom_point() +
+  geom_line(aes(group=NIH), alpha=0.4) + 
+  scale_color_gradient2() +
+  facet_grid(Oxidation~diet.label, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(y="Oxidation rate (kcal/day)",
+       x="",
+       caption = "delta.MRQ is the difference between the chamber and the energy balance (EU2) chamber")
+
+rm(temp, eu.ox, RQ, EU.RQ)
+```
+
+
+Put all of these plots together
+
+```{r}
+plot.data$chamber <- factor(plot.data$chamber, levels = c("Energy balance chamber", "Chamber"))
+plot.data$physiology <- factor(plot.data$physiology,
+                               levels = c("Energy expenditure",
+                                          "Respiratory quotient",
+                                          "Carbohydrate oxidation",
+                                          "Lipid oxidation",
+                                          "Protein oxidation",
+                                          "delta NEFA"),
+                               labels = c("Energy expenditure (kcal/d)",
+                                          "Respiratory quotient",
+                                          "Carbohydrate oxidation (kcal/d)",
+                                          "Lipid oxidation (kcal/d)",
+                                          "Protein oxidation (kcal/d)",
+                                          "delta NEFA (mEq/L)")
+                               )
+plot.data <- plot.data %>% filter(DIET!="EU2")
+plot.data$nudge <- case_when(plot.data$chamber=="Chamber" ~ -0.1,
+                             plot.data$chamber=="Energy balance chamber" ~ 0.1)
+
+# identify which measures increased for which participants and colorize by increase/decrease
+plot.data.wide <- plot.data %>% select(!nudge) %>% pivot_wider(values_from = value, names_from = chamber) %>% mutate(Change = ifelse(`Chamber`>`Energy balance chamber`, "Increase", "Decrease"))
+
+plot.data <- plot.data %>% left_join(plot.data.wide %>% select(NIH, DIET, physiology, Change))
+
+ggplot(plot.data %>% drop_na(), aes(x=chamber, y=value)) +
+  geom_point(aes(col=Change), size=0.3) +
+  geom_line(aes(group=NIH, col=Change), alpha=0.3, show.legend = FALSE) +
+  scale_colour_manual(values=c("Decrease"="blue", "Increase"="red")) +
+  geom_boxplot(position=position_nudge(x=plot.data$nudge), width=0.1, outlier.shape = NA) +
+  # ggpubr::stat_compare_means(vjust=1, size=3) +
+  facet_grid(physiology~diet.label, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  labs(x="",
+       y="") +
+  guides(col = guide_legend(title = ""))
+ggsave("physiology_changes_by_chamber.pdf", width=15, height=15, device="pdf")
+```
+
+
+P values are all <0.05 EXCEPT for 
+
+```{r}
+test <- plot.data %>% drop_na() %>% select(!any_of(c("nudge", "change"))) %>% pivot_wider(names_from = chamber, values_from = value)
+
+test <- test %>% mutate(wilcoxon.p = wilcox.test(`Chamber`, `Energy balance chamber`, alternative = "two.sided", paired = TRUE)$p.value, .by=c("DIET", "physiology"))
+
+
+rmarkdown::paged_table(test %>% select(diet.label, physiology, wilcoxon.p) %>% distinct() %>% filter(wilcoxon.p>0.05))
+
+rm(test, plot.data, plot.data.wide)
+```
+
+
+
+
+# Models of EE/RQ/oxdiation as a function of log2 fold change metabolite
+
+We are interested in looking at the correlations between changes in metabolites with energy expenditure, respiratory quotient, and  the sublevel phenotypes of protein/fat/carb oxidation.
+
+## Diet stratified analysis of log2fc metabolite as predictor of EE/RQ/oxidation
+
+```{r}
+dataForModels <- MetFlex_Metabolites_NoNA %>% 
+                  select(Sample_ID, Diet_code, Compound_ID, Chamber_time, Chamber_order, log2.Value) %>% 
+                  pivot_wider(names_from = c(Compound_ID, Chamber_time),
+                              names_sep = "_", values_from = log2.Value)
+
+dataForModels$Diet_code <- as.factor(dataForModels$Diet_code)
+dataForModels$Diet_code <- relevel(dataForModels$Diet_code, ref="EU")
+
+dataForModels <- dataForModels %>% 
+                  left_join(phenotype.data %>% 
+                              select(NIH, AGE, MALE, Race, BMI, DIET, MRQ, M4EE, CARBOX, LIPOX, PROTOX) %>% 
+                              mutate(DIET = substr(DIET, 1,2)) %>% 
+                              distinct(),
+                            by=c("Sample_ID"="NIH", "Diet_code"="DIET")) %>% 
+                  relocate(AGE, MALE, Race, BMI, MRQ, M4EE, CARBOX, LIPOX, PROTOX, .after=Sample_ID)
+
+
+
+# calculate delta metabolite which is the log2 FC
+
+for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+  pre <- paste0(m, "_A")
+  post <- paste0(m, "_B")
+  fc <- paste0(m, "_log2fc")
+  
+  dataForModels[[fc]] <- dataForModels[[post]]-dataForModels[[pre]]
+}
+
+dataForModels$Diet_code <- as.factor(dataForModels$Diet_code)
+dataForModels$Diet_code <- relevel(dataForModels$Diet_code, ref="EU")
+
+dataForModels$MALE <- factor(dataForModels$MALE, levels = 0:1, labels = c("Female", "Male"))
+dataForModels$Race <- as.factor(dataForModels$Race)
+
+rm(m, pre, post, fc)
+```
+
+how many participants underwent all chambers?
+
+```{r}
+count <- dataForModels %>% select(Sample_ID, Diet_code)
+count <- count %>% 
+          mutate(ch_num = length(Diet_code), .by="Sample_ID") %>%
+          select(Sample_ID, ch_num) %>%
+          distinct()
+
+table(count$ch_num==7, exclude = NULL)
+
+ggplot(count, aes(x=ch_num)) +
+  geom_bar() +
+  theme_bw() +
+  scale_x_continuous(name="Number of dietary chambers completed",
+                     limits = c(0.5,7.5),
+                     breaks = 1:7) +
+  ylab("Number of participants")
+ggsave("participant_diet_chamber_counts.pdf", height = 3, width = 5)
+
+rm(cout)
+```
+
+So we have 48 participants with data from all 7 dietary chambers and 49 without.
+
+We could derive the mixed model on the 48 participants with complete data on the 7 chambers and validate in the 49 without.
+
+After discussing this with Ravi we will not split the data set (too much loss of POWER!) so we will do it on the whole dataset.
+
+linear model loop
+
+```{r}
+physio.log2fc.results <- NULL
+
+for(d in unique(dataForModels$Diet_code)){
+  for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+    for(outcome in c("M4EE", "MRQ", "CARBOX", "LIPOX", "PROTOX")){
+      pre <- paste0(m, "_A")
+      fc <- paste0(m, "_log2fc")
+      
+      fmla <- as.formula(paste(outcome, "~", fc, "+", pre, "+ AGE + MALE + Race + BMI"))
+      
+      tmp <- dataForModels %>% filter(Diet_code==d)
+      
+      result <- lm(fmla, data=tmp)
+      result.sum <- summary(result)
+      
+      physio.log2fc.results <- physio.log2fc.results %>%
+                                bind_rows(as.data.frame(result.sum$coefficients) %>% 
+                                  rownames_to_column(var="Term") %>% 
+                                  mutate(Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                         Diet = d,
+                                         Outcome = outcome,
+                                         Adjustments = "Age/Sex/Race/BMI/pre-chamber metabolite",
+                                         n = nobs(result)) %>%
+                                  relocate(Outcome, Metabolite, .before = everything())
+                                  )
+    }
+  }
+}
+
+physio.log2fc.results <- physio.log2fc.results %>% mutate(fdr = p.adjust(`Pr(>|t|)`, method="BH"), .by=c("Term", "Outcome", "Diet"))
+
+rm(d, m, outcome, pre, fc, fmla, tmp, result, result.sum)
+```
+
+```{r}
+plot.data <- physio.log2fc.results %>%
+             filter(grepl("log2fc", Term)) %>%
+             mutate(Diet.label = case_when(Diet=="BO"~"Balanced overfeeding",
+                                             Diet=="FS"~"24-hr fasting",
+                                             Diet=="CN"~"High-carbohydrate",
+                                             Diet=="FN"~"High-fat",
+                                             Diet=="LP"~"Low-protein",
+                                             Diet=="HP"~"High-protein",
+                                             Diet=="EU"~"Energy balance"))
+
+plot.data$Diet.label <- as.factor(plot.data$Diet.label)
+plot.data$Diet.label <- relevel(plot.data$Diet.label, ref = "Energy balance")
+
+plot.data <- plot.data %>% left_join(plotting.classes, by=c("Metabolite"="metabolite"))
+
+plot.data <- plot.data %>% mutate(new.outcome = case_when(Outcome=="M4EE" ~ "Energy expenditure",
+                                 Outcome=="MRQ" ~ "Respiratory quotient",
+                                 Outcome=="PROTOX" ~ "Protein oxidation",
+                                 Outcome=="CARBOX" ~ "Carbohydrate oxidation",
+                                 Outcome=="LIPOX" ~ "Lipid oxidation"))
+
+plot.data$new.outcome <- factor(plot.data$new.outcome,
+                                levels = c("Energy expenditure",
+                                          "Respiratory quotient",
+                                          "Carbohydrate oxidation",
+                                          "Lipid oxidation",
+                                          "Protein oxidation"))
+
+
+ggplot(plot.data, aes(Estimate, -log(`Pr(>|t|)`, base=10))) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggrepel::geom_text_repel(aes(label = Metabolite), size=2) +
+  geom_hline(yintercept = -log(max(plot.data$`Pr(>|t|)`[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+  theme_bw() +
+  facet_grid(Diet.label~new.outcome, scales = "free") +
+  theme(strip.background = element_rect(fill="white", colour = "black"),
+        legend.position = "bottom") +
+  labs(x=expression(beta~on~log[2]~fold~change~metabolite~`for`~outcome),
+       y=expression(-log[10](p~value)),
+       caption = "Model: physio measure ~ log2fc metabolite + pre-chamber NEFA + pre-chamber metabolite + age + sex + race + BMI.") +
+  guides(col = guide_legend(title = "Metabolite class"))
+ggsave("physio.log2fc.metabolite.pdf", height = 20, width = 20, device = "pdf")
+```
+
+Save to csv
+```{r}
+tmp <- plot.data %>%
+        select(new.outcome, Diet.label, Metabolite, HMDB_ID, where(is.numeric), Adjustments) %>%
+        rename(Outcoe = new.outcome,
+               Diet = Diet.label,
+               Beta = Estimate)
+
+readr::write_csv(tmp, "physio.log2fc.metabolite.results.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "physio.log2fc.metabolite.results.csv")
+
+rm(plot.data, tmp)
+```
+
+## Mixed model approach to log2fc as a predictor of EE/RQ/oxidation
+mixed model loop
+
+Model: energy expenditure ~ log2fc metabolite + pre chamber metabolite level + dietary chamber + age/sex/race/BMI + random intercept per participant.
+
+```{r}
+delta.delta.nlme <- NULL
+delta.delta.nlme.predicted <- NULL
+
+for(outcome in c("M4EE", "MRQ", "CARBOX", "LIPOX", "PROTOX")){
+  for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+    pre <- paste0(m, "_A")
+    fc <- paste0(m, "_log2fc")
+    
+    fmla1 <- as.formula(paste(outcome, "~", fc, "+", pre, "+ AGE + MALE + Race + BMI + Diet_code"))
+    
+    derive.tmp <- subset(dataForModels, select = c("Sample_ID","Diet_code", "AGE", "MALE", "Race", "BMI", outcome, pre , fc))
+    table(duplicated(derive.tmp[, c(1, 2)]))
+    derive.tmp <- derive.tmp[complete.cases(derive.tmp), ] #missing is OK for lmer. Need specify na.action=na.exclude for lme.
+    
+    derive.M <- model.matrix(fmla1,
+                    data = derive.tmp)
+    dim(derive.M)
+    k <- caret::findLinearCombos(derive.M)
+    
+    deriveCorrelationsRemovedData <- data.frame(Sample_ID = derive.tmp$Sample_ID,
+                                        derive.M[,-c(1, k$remove)])
+  
+    deriveCorrelationsRemovedData[[outcome]] <- derive.tmp[[outcome]]
+
+    fmla2 <- as.formula(paste(outcome, "~", paste(colnames(deriveCorrelationsRemovedData %>% 
+                                                            select(!any_of(c("Sample_ID", outcome)))), collapse="+")))
+  
+    cs_model <- nlme::lme(fmla2 , random = ~ 1 | Sample_ID,
+                          correlation=nlme::corCompSymm(), # compound symmetry
+                          data=deriveCorrelationsRemovedData,
+                          control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+    cs_model.sum <- summary(cs_model)
+    
+    # ICC
+    variance <- nlme::VarCorr(cs_model)
+    var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+    var_total <- as.numeric(variance[1:nrow(variance)])
+    icc.cs <- sum(var_between)/sum(var_total)
+     
+     
+    un_model <- nlme::lme(fmla2 , random = ~ 1 | Sample_ID,
+                          correlation=nlme::corSymm(), # unstructured
+                          data=deriveCorrelationsRemovedData,
+                          control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+    un_model.sum <- summary(un_model)
+    
+    # ICC
+    variance <- nlme::VarCorr(un_model)
+    var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+    var_total <- as.numeric(variance[1:nrow(variance)])
+    icc.un <- sum(var_between)/sum(var_total)
+    
+    
+    delta.delta.nlme <- delta.delta.nlme %>% 
+                      bind_rows(as.data.frame(summary(cs_model)$tTable) %>% 
+                                  rownames_to_column(var="Term") %>% 
+                                  mutate(Outcome = outcome,
+                                         Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                         Adjustments = "Age/Sex/Race/BMI/Diet/pre chamber metabolite",
+                                         n = nobs(cs_model),
+                                         cov_str = "CS",
+                                         AIC = AIC(cs_model),
+                                         BIC = BIC(cs_model),
+                                         ICC = icc.cs) %>%
+                                  relocate(Metabolite, .before = everything())
+                                )
+    
+    delta.delta.nlme <- delta.delta.nlme %>% 
+                      bind_rows(as.data.frame(summary(un_model)$tTable) %>% 
+                                  rownames_to_column(var="Term") %>% 
+                                  mutate(Outcome = outcome,
+                                         Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                         Adjustments = "Age/Sex/Race/BMI/Diet/pre chamber metabolite",
+                                         n = nobs(un_model),
+                                         cov_str = "UN",
+                                         AIC = AIC(un_model),
+                                         BIC = BIC(un_model),
+                                         ICC = icc.un) %>%
+                                  relocate(Metabolite, .before = everything())
+                                )
+    
+    # model fit
+    score.coefs <- as.data.frame(cs_model$coefficients$fixed) %>% 
+                    rownames_to_column(var="Term") %>% 
+                    rename(beta = `cs_model$coefficients$fixed`) %>%
+                    filter(Term!="(Intercept)")
+    
+    delta.delta.nlme.predicted <- delta.delta.nlme.predicted %>% bind_rows(
+                          data.frame(Sample_ID = deriveCorrelationsRemovedData$Sample_ID,
+                                     Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                     Outcome = outcome,
+                                     Compound_ID = m,
+                                     Diet_code = derive.tmp$Diet_code,
+                                     predicted = as.matrix(deriveCorrelationsRemovedData %>% select(all_of(score.coefs$Term))) %*% score.coefs$beta,
+                                     actual = as.vector(deriveCorrelationsRemovedData[[outcome]])
+                          ))
+
+  }
+}
+
+
+delta.delta.nlme <- delta.delta.nlme %>% 
+                    mutate(fdr = p.adjust(`p-value`, method="BH"), .by=c("Outcome", "Term", "cov_str")) %>% 
+                    relocate(fdr, .after = `p-value`)
+
+rmarkdown::paged_table(delta.delta.nlme %>% filter(grepl("log2fc", Term)) %>% filter(fdr<0.05, cov_str=="CS"))
+
+
+rm(outcome, m, pre, fc, fmla1, derive.tmp, derive.M, k, deriveCorrelationsRemovedData, fmla2, cs_model, cs_model.sum, un_model, un_model.sum,
+   variance, var_between, var_total, icc.cs, icc.un, score.coefs)
+```
+
+compare AIC / BIC
+
+```{r}
+delta.delta.nlme %>% 
+  select(Metabolite, Outcome, cov_str, AIC, BIC) %>% distinct() %>% 
+  summarise(mean_AIC = mean(AIC), mean_BIC = mean(BIC), .by=c("cov_str", "Outcome"))
+```
+
+We will chose to use the compound symmetry models to be consistent with our prior choice so the methods are simplified.
+
+Calculate spearman coefs between predicted and actual for every combination of metabolite, outcome, and diet
+
+```{r}
+delta.delta.nlme.model.rho <- delta.delta.nlme.predicted %>% 
+  summarise(rho = cor(predicted, actual, method = "spearman"), .by=c("Metabolite", "Outcome", "Diet_code"))
+
+delta.delta.nlme.model.rho <- delta.delta.nlme.model.rho %>%
+  mutate(diet.label = case_when(Diet_code=="BO"~"Balanced overfeeding",
+                                Diet_code=="FS"~"24-hr fasting",
+                                Diet_code=="CN"~"High-carbohydrate",
+                                Diet_code=="FN"~"High-fat",
+                                Diet_code=="LP"~"Low-protein",
+                                Diet_code=="HP"~"High-protein",
+                                Diet_code=="EU"~"Energy balance")) %>%
+  mutate(new.outcome = case_when(Outcome=="M4EE" ~ "24-hour energy expenditure",
+                                 Outcome=="MRQ" ~ "24-hour respiratory quotient",
+                                 Outcome=="PROTOX" ~ "24-hour protein oxidation",
+                                 Outcome=="CARBOX" ~ "24-hour carbohydrate oxidation",
+                                 Outcome=="LIPOX" ~ "24-hour lipid oxidation"))
+
+delta.delta.nlme.model.rho$new.outcome <- factor(delta.delta.nlme.model.rho$new.outcome,
+                                                 levels = c("24-hour energy expenditure",
+                                                            "24-hour respiratory quotient",
+                                                            "24-hour carbohydrate oxidation",
+                                                            "24-hour lipid oxidation",
+                                                            "24-hour protein oxidation"))
+
+
+ggplot(delta.delta.nlme.model.rho, aes(new.outcome, rho)) +
+  geom_boxplot(aes(col=diet.label), position = position_dodge2(), outlier.size = 1) +
+  scale_color_manual(values = col_diet) +
+  theme_bw() +
+  labs(y=expression(Spearman~rho),
+       x="") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  guides(col = guide_legend(title = "Diet"))
+ggsave("delta.delta.nlme.model.rho.pdf", height = 7, width = 7)
+```
+
+Figure Caption: Distribution of mixed model predictions of dietary chamber physiology measures across all metabolites surveyed. Example model: EE ~ log2 FC metablite + pre chamber metabolite + diet + age/sex/race/bmi + random intercept per individual.
+
+```{r, fig.height=7, fig.width=10}
+
+nlme.volcano.plotList <- NULL
+
+delta.delta.nlme <- delta.delta.nlme %>% mutate(new.outcome = case_when(Outcome=="M4EE" ~ "24-hour energy expenditure",
+                                                                        Outcome=="MRQ" ~ "24-hour respiratory quotient",
+                                                                        Outcome=="PROTOX" ~ "24-hour protein oxidation",
+                                                                        Outcome=="CARBOX" ~ "24-hour carbohydrate oxidation",
+                                                                        Outcome=="LIPOX" ~ "24-hour lipid oxidation"))
+
+for(o in unique(delta.delta.nlme$Outcome)){
+  plot.data <- delta.delta.nlme %>% 
+                filter(grepl("log2fc", Term), Outcome==o, cov_str=="CS") %>% 
+                left_join(plotting.classes,by=c("Metabolite"="metabolite"))
+  
+  nlme.volcano.plotList[[o]] <- ggplot(plot.data, aes(Value, -log(`p-value`, base=10))) +
+    geom_point(aes(col=new.class)) +
+    scale_color_manual(values = metabolite.class.colors) +
+    # facet_wrap(~outcome, nrow = 2, scales = "free") +
+    geom_hline(yintercept = -log(max(plot.data$`p-value`[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+    ggrepel::geom_text_repel(aes(label=Metabolite), size=2) +
+    theme_bw() +
+    guides(color = guide_legend(title = "Metabolite class")) +
+    labs(x=expression(beta~on~metabolite~log[2]~fold~change),
+        y=expression(-log[10](p~value)),
+        subtitle = unique(plot.data$new.outcome))
+}
+
+rm(o, plot.data)
+```
+
+Arrange the plots nicely
+
+```{r}
+nlme.volcano.plotList$M4EE <- nlme.volcano.plotList$M4EE + labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~energy~expenditure))
+nlme.volcano.plotList$MRQ <- nlme.volcano.plotList$MRQ + labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~respiratory~quotient))
+nlme.volcano.plotList$CARBOX <- nlme.volcano.plotList$CARBOX + labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~carbohydrate~oxidation))
+nlme.volcano.plotList$LIPOX <- nlme.volcano.plotList$LIPOX + labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~lipid~oxidation))
+nlme.volcano.plotList$PROTOX <- nlme.volcano.plotList$PROTOX + labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~protein~oxidation))
+
+
+ggpubr::ggarrange(plotlist=nlme.volcano.plotList, nrow=1, common.legend = TRUE, legend="right")
+ggsave("nlme.volcano.plotList.pdf", width = 30, height = 6)
+```
+
+
+```{r}
+plot.data <- delta.delta.nlme %>% 
+  filter(grepl("log2fc", Term), cov_str=="CS") %>% 
+  select(Metabolite, Outcome, Value) %>% pivot_wider(names_from = "Outcome", values_from = "Value")
+
+ggplot(plot.data, aes(MRQ, M4EE)) +
+  geom_point() +
+  ggpubr::stat_cor(method="spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  labs(y=expression(Metabolite~log[2]~fold~change~coefficient~`for`~24~hr~energy~expenditure),
+       x=expression(Metabolite~log[2]~fold~change~coefficient~`for`~24~hr~respiratory~quotient)) +
+  theme(axis.title.x = element_text(size=8),
+        axis.title.y = element_text(size=8))
+ggsave("RQ_EE_deltaDelta_nlme_compare.pdf", height = 4, width = 6)
+
+rm(plot.data)
+```
+
+
+Save to csv
+
+```{r}
+tmp <- delta.delta.nlme %>%
+        left_join(MetFlex_Metabolite_Dictionary) %>%
+        filter(grepl("log2fc", Term) | grepl("_A", Term), cov_str=="CS") %>%
+        select(new.outcome, Metabolite, HMDB_ID, Term, Value, Std.Error, `t-value`, `p-value`, fdr, Adjustments) %>%
+        rename(Outcome = new.outcome,
+               Beta = Value) %>%
+        mutate(Term = case_when(grepl("log2fc", Term) ~ "log2 fold change",
+                                grepl("_A", Term) ~ "pre-chamber level (log2 units)"))
+
+readr::write_csv(tmp, "physio.log2fc.nlme.results.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "physio.log2fc.nlme.results.csv")
+
+rm(tmp)
+```
+
+# Compare mixed model with diet-stratified model
+
+```{r}
+tmp <- delta.delta.nlme %>%
+        filter(grepl("log2fc", Term), cov_str=="CS") %>%
+        select(Outcome, new.outcome, Metabolite, Term, Value, `p-value`, fdr) %>%
+        rename(mixed_beta = Value,
+               mixed_pval = `p-value`,
+               mixed_fdr = fdr) %>%
+        left_join(physio.log2fc.results %>% 
+                    select(Outcome, Metabolite, Term, Estimate, `Pr(>|t|)`, fdr, Diet) %>%
+                    rename(diet_beta = Estimate,
+                           diet_pval = `Pr(>|t|)`,
+                           diet_fdr = fdr),
+                  by=c("Outcome", "Metabolite", "Term")) %>%
+        mutate(diet.label = case_when(Diet=="BO"~"Balanced overfeeding",
+                                Diet=="FS"~"24-hr fasting",
+                                Diet=="CN"~"High-carbohydrate",
+                                Diet=="FN"~"High-fat",
+                                Diet=="LP"~"Low-protein",
+                                Diet=="HP"~"High-protein",
+                                Diet=="EU"~"Energy balance")) %>%
+        left_join(plotting.classes, by=c("Metabolite"="metabolite"))
+
+tmp$diet.label <- as.factor(tmp$diet.label)
+tmp$diet.label <- relevel(tmp$diet.label, ref="Energy balance")
+
+plotlist <- NULL
+
+for(i in unique(tmp$new.outcome)){
+  plotlist[[i]] <-
+  ggplot(tmp %>% filter(new.outcome==i), aes(mixed_beta, diet_beta)) +
+    geom_point(aes(col=new.class)) +
+    scale_color_manual(values=metabolite.class.colors) +
+    theme_bw() +
+    ggpubr::stat_cor(method="spearman", cor.coef.name = "rho") +
+    facet_wrap(~diet.label, nrow = 1, scales = "free") +
+    theme(strip.background = element_rect(fill="white", color="black")) +
+    guides(col=guide_legend(title = "Metabolite class")) +
+    labs(x=expression(beta~from~mixed~model),
+         y=expression(beta~from~diet~stratified~models),
+         subtitle = i)
+}
+
+# arrange nicely
+ggpubr::ggarrange(plotlist = plotlist, ncol = 1, common.legend = TRUE, legend = "bottom")
+ggsave("compare_nlme_lm_physio.pdf", height = 20, width = 20)
+```
+
+# NEFA: Model metabolite fold changes to correlate with changes in NEFA
+
+```{r}
+MetFlex_FFA_data <- MetFlex_FFA_data %>%
+                    mutate(TEST = substr(TEST, 1, 2),
+                           Sample_ID = as.character(as.numeric(as.character(NIH)))) %>% # this is all to drop the leading 0
+                    rename(Diet_code = TEST)
+
+dataForModels <- dataForModels %>%
+                 left_join(MetFlex_FFA_data %>% select(Sample_ID, Diet_code, contains("FFA")), by=c("Sample_ID", "Diet_code")) %>%
+                 relocate(contains("FFA"), .after = BMI)
+```
+
+linear model approach by diet
+```{r}
+delta.ffa.lm.results <- NULL
+
+for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+  for(d in unique(dataForModels$Diet_code)){
+    
+    pre <- paste0(m, "_A")
+    fc <- paste0(m, "_log2fc")
+    
+    tmp <- dataForModels %>% filter(Diet_code==d)
+    
+    fmla <- as.formula(paste("FFA.post ~ FFA.pre +", fc, "+", pre, "+ AGE + MALE + Race + BMI"))
+    
+    result <- lm(fmla, data=tmp)
+    result.sum <- summary(result)
+    
+    delta.ffa.lm.results <- delta.ffa.lm.results %>%
+                            bind_rows(as.data.frame(result.sum$coefficients) %>% 
+                                  rownames_to_column(var="Term") %>% 
+                                  mutate(Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                         Diet = d,
+                                         Outcome = "Post-chamber NEFA",
+                                         Adjustments = "Age/Sex/Race/BMI/pre-chamber NEFA/pre-chamber metabolite",
+                                         n = nobs(result)) %>%
+                                  relocate(Outcome, Metabolite, .before = everything())
+                                )
+  }
+}
+
+delta.ffa.lm.results <- delta.ffa.lm.results %>% mutate(fdr = p.adjust(`Pr(>|t|)`, method="BH"), .by=c("Term", "Diet"))
+
+rm(m, d, pre, fc, tmp, fmla, result, result.sum)
+```
+
+Volcano plots
+
+```{r}
+plot.data <- delta.ffa.lm.results %>%
+             filter(grepl("log2fc", Term)) %>%
+             mutate(Diet.label = case_when(Diet=="BO"~"Balanced overfeeding",
+                                             Diet=="FS"~"24-hr fasting",
+                                             Diet=="CN"~"High-carbohydrate",
+                                             Diet=="FN"~"High-fat",
+                                             Diet=="LP"~"Low-protein",
+                                             Diet=="HP"~"High-protein",
+                                             Diet=="EU"~"Energy balance"))
+
+plot.data$Diet.label <- as.factor(plot.data$Diet.label)
+plot.data$Diet.label <- relevel(plot.data$Diet.label, ref = "Energy balance")
+
+plot.data <- plot.data %>% left_join(plotting.classes, by=c("Metabolite"="metabolite"))
+
+ggplot(plot.data, aes(Estimate, -log(`Pr(>|t|)`, base=10))) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  ggrepel::geom_text_repel(aes(label = Metabolite), size=2) +
+  geom_hline(yintercept = -log(max(plot.data$`Pr(>|t|)`[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+  theme_bw() +
+  facet_wrap(~Diet.label, nrow = 1, scales = "free") +
+  theme(strip.background = element_rect(fill="white", colour = "black"),
+        legend.position = "bottom") +
+  labs(x=expression(beta~on~log[2]~fold~change~metabolite~`for`~post~chamber~NEFA),
+       y=expression(-log[10](p~value)),
+       caption = "Model: post-chabmer NEFA ~ log2fc metabolite + pre-chamber NEFA + pre-chamber metabolite + age + sex + race + BMI.") +
+  guides(col = guide_legend(title = "Metabolite class"))
+ggsave("delta.NEFA.log2fc.metabolite.pdf", height = 8, width = 32, device = "pdf")
+```
+
+Save to csv
+```{r}
+tmp <- plot.data %>%
+        select(Outcome, Diet.label, Metabolite, HMDB_ID, where(is.numeric)) %>%
+        rename(Beta = Estimate)
+
+readr::write_csv(tmp, "nefa.lm.results.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "nefa.lm.results.csv")
+
+rm(tmp, plot.data)
+```
+
+## Mixed model approach
+```{r}
+ffa.delta.nlme.results <- NULL
+ffa.delta.nlme.predicted <- NULL
+
+for(m in unique(MetFlex_Metabolites_NoNA$Compound_ID)){
+  pre <- paste0(m, "_A")
+  fc <- paste0(m, "_log2fc")
+  
+  fmla1 <- as.formula(paste("FFA.post ~ FFA.pre +", fc, "+", pre, "+ AGE + MALE + Race + BMI + Diet_code"))
+  
+  derive.tmp <- subset(dataForModels, select = c("Sample_ID","Diet_code", "AGE", "MALE", "Race", "BMI", "FFA.post", "FFA.pre", pre , fc))
+  table(duplicated(derive.tmp[, c(1, 2)]))
+  derive.tmp <- derive.tmp[complete.cases(derive.tmp), ] #missing is OK for lmer. Need specify na.action=na.exclude for lme.
+  
+  derive.M <- model.matrix(fmla1,
+                  data = derive.tmp)
+  dim(derive.M)
+  k <- caret::findLinearCombos(derive.M)
+  
+  deriveCorrelationsRemovedData <- data.frame(Sample_ID = derive.tmp$Sample_ID,
+                                      derive.M[,-c(1, k$remove)])
+
+  deriveCorrelationsRemovedData[["FFA.post"]] <- derive.tmp[["FFA.post"]]
+
+  fmla2 <- as.formula(paste("FFA.post", "~", paste(colnames(deriveCorrelationsRemovedData %>% 
+                                                          select(!any_of(c("Sample_ID", "FFA.post")))), collapse="+")))
+
+  cs_model <- nlme::lme(fmla2 , random = ~ 1 | Sample_ID,
+                        correlation=nlme::corCompSymm(), # compound symmetry
+                        data=deriveCorrelationsRemovedData,
+                        control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+  cs_model.sum <- summary(cs_model)
+  
+  # ICC
+  variance <- nlme::VarCorr(cs_model)
+  var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+  var_total <- as.numeric(variance[1:nrow(variance)])
+  icc.cs <- sum(var_between)/sum(var_total)
+   
+   
+  un_model <- nlme::lme(fmla2 , random = ~ 1 | Sample_ID,
+                        correlation=nlme::corSymm(), # unstructured
+                        data=deriveCorrelationsRemovedData,
+                        control =list(msMaxIter = 1000, msMaxEval = 1000)) 
+  un_model.sum <- summary(un_model)
+  
+  # ICC
+  variance <- nlme::VarCorr(un_model)
+  var_between <- as.numeric(variance[1:(nrow(variance)-1)])
+  var_total <- as.numeric(variance[1:nrow(variance)])
+  icc.un <- sum(var_between)/sum(var_total)
+  
+  
+  ffa.delta.nlme.results <- ffa.delta.nlme.results %>% 
+                    bind_rows(as.data.frame(summary(cs_model)$tTable) %>% 
+                                rownames_to_column(var="Term") %>% 
+                                mutate(Outcome = "Post-chamber NEFA",
+                                       Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                       Adjustments = "Age/Sex/Race/BMI/Diet/pre chamber metabolite/pre chamber FFA",
+                                       n = nobs(cs_model),
+                                       cov_str = "CS",
+                                       AIC = AIC(cs_model),
+                                       BIC = BIC(cs_model),
+                                       ICC = icc.cs) %>%
+                                relocate(Metabolite, .before = everything())
+                              )
+  
+  ffa.delta.nlme.results <- ffa.delta.nlme.results %>% 
+                    bind_rows(as.data.frame(summary(un_model)$tTable) %>% 
+                                rownames_to_column(var="Term") %>% 
+                                mutate(Outcome = "Post-chamber NEFA",
+                                       Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                       Adjustments = "Age/Sex/Race/BMI/Diet/pre chamber metabolite/pre chamber FFA",
+                                       n = nobs(un_model),
+                                       cov_str = "UN",
+                                       AIC = AIC(un_model),
+                                       BIC = BIC(un_model),
+                                       ICC = icc.un) %>%
+                                relocate(Metabolite, .before = everything())
+                              )
+  
+  # model fit
+  score.coefs <- as.data.frame(cs_model$coefficients$fixed) %>% 
+                  rownames_to_column(var="Term") %>% 
+                  rename(beta = `cs_model$coefficients$fixed`) %>%
+                  filter(Term!="(Intercept)")
+  
+  ffa.delta.nlme.predicted <- ffa.delta.nlme.predicted %>% bind_rows(
+                        data.frame(Sample_ID = deriveCorrelationsRemovedData$Sample_ID,
+                                   Metabolite = MetFlex_Metabolite_Dictionary$Metabolite[MetFlex_Metabolite_Dictionary$Compound_ID==m],
+                                   Outcome = "Post-chamber NEFA",
+                                   Compound_ID = m,
+                                   Diet_code = derive.tmp$Diet_code,
+                                   predicted = as.matrix(deriveCorrelationsRemovedData %>% select(all_of(score.coefs$Term))) %*% score.coefs$beta,
+                                   actual = as.vector(deriveCorrelationsRemovedData[["FFA.post"]])
+                        ))
+}
+
+
+ffa.delta.nlme.results <- ffa.delta.nlme.results %>% 
+                    mutate(fdr = p.adjust(`p-value`, method="BH"), .by=c("Outcome", "Term", "cov_str")) %>% 
+                    relocate(fdr, .after = `p-value`)
+
+rmarkdown::paged_table(ffa.delta.nlme.results %>% filter(grepl("log2fc", Term)) %>% filter(fdr<0.05, cov_str=="CS"))
+
+
+rm( m, pre, fc, fmla1, derive.tmp, derive.M, k, deriveCorrelationsRemovedData, fmla2, cs_model, cs_model.sum, un_model, un_model.sum,
+   variance, var_between, var_total, icc.cs, icc.un, score.coefs)
+```
+
+Make a volcano plot of this
+
+```{r}
+plot.data <- ffa.delta.nlme.results %>%
+             filter(grepl("log2fc", Term), cov_str=="CS") %>%
+             left_join(plotting.classes, by=c("Metabolite"="metabolite"))
+
+
+ggplot(plot.data, aes(Value, -log(`p-value`, base=10))) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  geom_hline(yintercept = -log(max(plot.data$`p-value`[plot.data$fdr<0.05]),base = 10), linetype="dotted") +
+  ggrepel::geom_text_repel(aes(label=Metabolite), size=2) +
+  theme_bw() +
+  guides(color = guide_legend(title = "Metabolite class")) +
+  labs(x=expression(beta~on~metabolite~log[2]~fold~change~`for`~post~chamber~NEFA),
+      y=expression(-log[10](p~value)),
+      subtitle = "NEFA",
+      caption = "Mixed model: post NEFA ~ log2 fc metabolite + pre NEFA + pre metabolite + diet + age + sex + race + BMI") +
+  theme(legend.position = "bottom")
+ggsave("ffa_delta_log2fc_metabolite_volcano.pdf", width = 10, height = 10)
+```
+
+Save to csv
+```{r}
+tmp <- plot.data %>%
+        select(Outcome, Metabolite, HMDB_ID, where(is.numeric), Adjustments) %>%
+        select(!any_of(c("n", "AIC", "BIC", "ICC"))) %>%
+        rename(Beta = Value)
+
+readr::write_csv(tmp, "nefa.nlme.results.csv")
+outputFilesToMd5 <- c(outputFilesToMd5, "nefa.nlme.results.csv")
+
+rm(tmp)
+```
+
+Make a waterfall plot of the top 20 and bottom 20 effect sizes
+```{r}
+tmp.plot.data <- plot.data %>%
+              filter(fdr<0.05) %>%
+              mutate(value.rank = rank(Value))
+
+tmp.plot.data <- tmp.plot.data %>% 
+              filter(value.rank %in% c(1:20, (length(value.rank)-19):(length(value.rank)))) %>%
+              arrange(value.rank) %>%
+              mutate(Metabolite = factor(Metabolite, levels=Metabolite))
+
+p1 <- ggplot(tmp.plot.data, aes(Metabolite, Value)) +
+  geom_bar(aes(col=ifelse(sign(Value)<0, "Negative", "Positive"),
+               fill=ifelse(sign(Value)<0, "Negative", "Positive")),
+           stat = "identity", position = "identity", width = 0.80,
+           show.legend = FALSE) +
+  scale_color_manual(values=c("Negative"="blue", "Positive"="red")) +
+  scale_fill_manual(values=c("Negative"="blue", "Positive"="red")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+        legend.position = "bottom") +
+  labs(y=expression(atop(beta~on~metabolite~log[2]~fold~change,
+                         `for`~post~chamber~NEFA)),
+       x="")
+
+
+p2 <- ggplot(tmp.plot.data, aes(x=Metabolite, y=0.3)) +
+  geom_tile(aes(fill=new.class)) +
+  scale_fill_manual(values = metabolite.class.colors) +
+  theme_void() +
+  labs(y="",
+       x="") +
+  # ylim(0.2, 0.4) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank()) +
+  guides(fill = guide_legend(title="Metaoblite class"))
+
+
+ggpubr::ggarrange(p2, p1, ncol=1, nrow = 2, align = "hv", heights = c(1,2), common.legend = TRUE, legend = "bottom")
+ggsave("log2fc_metabolite_postFFA_waterfall.pdf", height = 7, width=10)
+
+rm(p1, p2, tmp.plot.data)
+```
+
+Plot the betas from the mixed model against the diet specific models.
+this will result in a 7 panel figure for each diet, with a beta on beta plot
+
+```{r}
+plot.data <- plot.data %>%
+             rename(mixed_beta = Value,
+                    mixed_fdr = fdr)
+
+temp <- delta.ffa.lm.results %>%
+             filter(grepl("log2fc", Term)) %>%
+             mutate(Diet.label = case_when(Diet=="BO"~"Balanced overfeeding",
+                                             Diet=="FS"~"24-hr fasting",
+                                             Diet=="CN"~"High-carbohydrate",
+                                             Diet=="FN"~"High-fat",
+                                             Diet=="LP"~"Low-protein",
+                                             Diet=="HP"~"High-protein",
+                                             Diet=="EU"~"Energy balance")) %>%
+              mutate(lm_beta = Estimate,
+                     lm_fdr = fdr)
+
+
+compare.plot.data <- plot.data %>% 
+                      select(Metabolite, Term, mixed_beta, mixed_fdr, new.class) %>%
+                      left_join(temp %>% select(Metabolite, Term, Diet, Diet.label, lm_beta, lm_fdr), by=c("Metabolite", "Term"))
+
+compare.plot.data$Diet.label <- as.factor(compare.plot.data$Diet.label)
+compare.plot.data$Diet.label <- relevel(compare.plot.data$Diet.label, ref="Energy balance")
+
+
+ggplot(compare.plot.data, aes(mixed_beta, lm_beta)) +
+  geom_point(aes(col=new.class)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  theme_bw() +
+  facet_wrap(~Diet.label, nrow=1, scales = "free") +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  theme(strip.background = element_rect(fill="white", color="black"),
+        legend.position = "bottom") +
+  guides(col=guide_legend(title = "Metabolite class")) +
+  labs(x=expression(beta~from~mixed~model),
+       y=expression(beta~from~diet~stratified~linear~model))
+ggsave("compare_NEFA_mixed_lm.pdf", height = 8, width = 32, device = "pdf")
+```
+
+
+Create a spearman correlation heatmap comparing the beta coefficients on log2 fold change metabolite from diet-specific models of post chamber NEFA
+
+```{r}
+plot.data <- delta.ffa.lm.results %>% 
+              filter(grepl("log2fc", Term)) %>%
+              mutate(Diet.label = case_when(Diet=="BO"~"Balanced overfeeding",
+                                             Diet=="FS"~"24-hr fasting",
+                                             Diet=="CN"~"High-carbohydrate",
+                                             Diet=="FN"~"High-fat",
+                                             Diet=="LP"~"Low-protein",
+                                             Diet=="HP"~"High-protein",
+                                             Diet=="EU"~"Energy balance")) %>%
+              select(Metabolite, Term, Estimate, Diet.label) %>%
+              pivot_wider(values_from = Estimate, names_from = Diet.label)
+
+cols.to.plot <- colnames(plot.data %>% select(where(is.numeric)))
+
+
+
+cor.mat <- cor(plot.data[,cols.to.plot], method = "spearman")
+
+cor.mat <- reshape2::melt(cor.mat, value.name = "rho")
+
+p.mat <- ggcorrplot::cor_pmat(plot.data[,cols.to.plot], method = "spearman")
+
+p.mat <- reshape2::melt(p.mat, value.name = "pval")
+
+tmp.plot.data <- cor.mat %>% 
+              left_join(p.mat) %>% 
+              mutate(rho = case_when(Var1==Var2 ~ NA,
+                                     .default = rho)) %>%
+              mutate(rho_p = case_when(pval<0.05 & !is.na(rho)~ paste0(round(rho,3), "*"),
+                                       pval>=0.05 ~ as.character(round(rho,3))))
+
+
+ggplot(tmp.plot.data %>% filter(!duplicated(rho)), aes(Var2, Var1)) +
+  geom_tile(aes(fill = rho)) +
+  geom_text(aes(label = rho_p)) +
+  scale_fill_gradient2(high = "firebrick", low = "royalblue", name = expression(Spearman~rho), na.value = NA) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+  labs(x="",
+       y="") 
+ggsave("log2fc_vs_NEFA_heatmap.pdf", height = 4, width=6)
+
+rm(cor.mat, p.mat, tmp.plot.data, cols.to.plot, plot.data)
+```
+
+# Plot delta PC/PEs (add all of them up) and delta carnitines (add all of them up) versus delta NEFA
+
+```{r}
+# need a long data frame of participant, diet, fold change
+long.fc <- dataForModels %>% 
+            select(Sample_ID, Diet_code, contains("_log2fc")) %>%
+            pivot_longer(contains("_log2fc"), names_to = "Compound_ID", values_to = "log2fc") %>%
+            mutate(Compound_ID = gsub("_log2fc", "", Compound_ID)) %>%
+            left_join(MetFlex_Metabolite_Dictionary %>% select(Compound_ID, Metabolite))
+
+
+LPEs <- LPCs[grepl("LPE", LPCs)]
+
+PC_PEs <- unique(long.fc$Metabolite[grep("PC", substr(long.fc$Metabolite, 1, 2))])
+PC_PEs <- c(PC_PEs, unique(long.fc$Metabolite[grep("PE", substr(long.fc$Metabolite, 1, 2))]))
+
+long.fc <- long.fc %>% mutate(deltaNEFAclass = case_when(Metabolite %in% PC_PEs ~ "PC/PEs",
+                                                         Metabolite %in% Carnitines ~ "Carnitines")) %>%
+            drop_na(deltaNEFAclass)
+
+table(long.fc$Metabolite, long.fc$deltaNEFAclass)
+
+summary.fc.by.ravi.class <- long.fc %>% summarise(sum_log2fc = sum(log2fc), .by=c("Sample_ID", "Diet_code", "deltaNEFAclass"))
+
+nefa <- MetFlex_FFA_data %>% 
+        mutate(NIH = as.character(as.numeric(NIH)),
+               delta.FFA = FFA.post - FFA.pre) %>% 
+        select(NIH, Diet_code, contains("FFA"))
+
+table(unique(summary.fc.by.ravi.class$Sample_ID) %in% unique(nefa$NIH)) # not everyone had NEFA data
+
+summary.fc.by.ravi.class <- summary.fc.by.ravi.class %>% left_join(nefa, by=c("Sample_ID"="NIH", "Diet_code"))
+
+summary.fc.by.ravi.class <- summary.fc.by.ravi.class %>%
+              mutate(Diet.label = case_when(Diet_code=="BO"~"Balanced overfeeding",
+                                             Diet_code=="FS"~"24-hr fasting",
+                                             Diet_code=="CN"~"High-carbohydrate",
+                                             Diet_code=="FN"~"High-fat",
+                                             Diet_code=="LP"~"Low-protein",
+                                             Diet_code=="HP"~"High-protein",
+                                             Diet_code=="EU"~"Energy balance"))
+```
+
+```{r, fig.height = 10, fig.width = 5}
+ggplot(summary.fc.by.ravi.class, aes(delta.FFA, sum_log2fc)) +
+  geom_point(aes(col=deltaNEFAclass), size=0.6, show.legend = FALSE) +
+  scale_color_manual(values=c("Carnitines"="green3", "PC/PEs"="firebrick")) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  facet_grid(Diet.label~deltaNEFAclass, scales = "free") +
+  theme(strip.background = element_rect(fill="white", color="black"),
+        legend.position = "bottom") +
+  labs(x=expression(Delta~NEFA),
+       y=expression(sum~of~log[2]~fold~changes))
+```
+
+```{r}
+summary.fc.by.ravi.class$Diet.label <- as.factor(summary.fc.by.ravi.class$Diet.label)
+summary.fc.by.ravi.class$Diet.label <- relevel(summary.fc.by.ravi.class$Diet.label, ref="Energy balance")
+
+ggplot(summary.fc.by.ravi.class %>% filter(deltaNEFAclass=="Carnitines"), aes(delta.FFA, sum_log2fc)) +
+  geom_point(aes(col=deltaNEFAclass), size=0.6, show.legend = FALSE) +
+  scale_color_manual(values=c("Carnitines"="green3", "PC/PEs"="firebrick")) +
+  ggpubr::stat_cor(method = "spearman", cor.coef.name = "rho") +
+  theme_bw() +
+  facet_wrap(~Diet.label, nrow = 1, scales = "free") +
+  theme(strip.background = element_rect(fill="white", color="black"),
+        legend.position = "bottom") +
+  labs(x=expression(Delta~NEFA),
+       y=expression(sum~of~log[2]~fold~changes~of~carnitines))
+ggsave("delta_NEFA_v_sumLog2fc.pdf", height = 3, width = 15)
+```
+
+```{r}
+rm(summary.fc.by.ravi.class, nefa, long.fc, temp)
+```
+
+
+# Circos plot
+
+I want to show the following in my circos plot:  
+average log2 fold change (bar plot)
+diet chamber (color)
+metabolite class (color)
+metabolite name? (text)
+add links between metabolites 
+
+```{r}
+plot.data <- t.testResult %>%
+              select(metabolite, diet, estimate, fdr) %>%
+              rename(tTest.estimate = estimate,
+                     tTest.fdr = fdr) %>%
+              mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                             diet=="FS"~"24-hr fasting",
+                                             diet=="CN"~"High-carbohydrate",
+                                             diet=="FN"~"High-fat",
+                                             diet=="LP"~"Low-protein",
+                                             diet=="HP"~"High-protein",
+                                             diet=="EU"~"Energy balance"))
+
+# merge in the beta from delta EE
+plot.data <- plot.data %>% 
+              left_join(physio.log2fc.results %>% 
+                          filter(Outcome=="M4EE") %>% 
+                          filter(grepl("_log2fc", Term)) %>% 
+                          select(Metabolite, Diet, Estimate),
+                        by=c("metabolite"="Metabolite", "diet"="Diet")) %>%
+              rename(betaM4EE = Estimate)
+
+# merge in the beta from delta RQ
+plot.data <- plot.data %>% 
+              left_join(physio.log2fc.results %>% 
+                          filter(Outcome=="MRQ") %>% 
+                          filter(grepl("_log2fc", Term)) %>% 
+                          select(Metabolite, Diet, Estimate),
+                        by=c("metabolite"="Metabolite", "diet"="Diet")) %>%
+              rename(betaMRQ = Estimate)
+
+# merge in the beta from delta CARBOX
+plot.data <- plot.data %>% 
+              left_join(physio.log2fc.results %>% 
+                          filter(Outcome=="CARBOX") %>% 
+                          filter(grepl("_log2fc", Term)) %>% 
+                          select(Metabolite, Diet, Estimate),
+                        by=c("metabolite"="Metabolite","diet"="Diet")) %>%
+              rename(betaCARBOX = Estimate)
+
+# merge in the beta from delta LIPOX
+plot.data <- plot.data %>% 
+              left_join(physio.log2fc.results %>% 
+                          filter(Outcome=="LIPOX") %>% 
+                          filter(grepl("_log2fc", Term)) %>% 
+                          select(Metabolite, Diet, Estimate),
+                        by=c("metabolite"="Metabolite", "diet"="Diet")) %>%
+              rename(betaLIPOX = Estimate)
+
+# merge in the beta from delta PROTOX
+plot.data <- plot.data %>% 
+              left_join(physio.log2fc.results %>% 
+                          filter(Outcome=="PROTOX") %>% 
+                          filter(grepl("_log2fc", Term)) %>% 
+                          select(Metabolite, Diet, Estimate),
+                        by=c("metabolite"="Metabolite", "diet"="Diet")) %>%
+              rename(betaPROTOX = Estimate)
+
+# what is the distribution of tTest estimates? this is the same as the log2 fold change
+ggplot(plot.data, aes(tTest.estimate)) +
+  geom_histogram() +
+  facet_wrap(~diet.label)
+
+# filter what metabolites to show
+plot.data <- plot.data %>%
+              filter(tTest.fdr<0.05 & abs(tTest.estimate)>0.5) %>% # only show the metabs with FDR<5% with an abs(log2 fc)>0.5 for t-test change
+              left_join(MetFlex_Metabolite_Dictionary, by=c("metabolite"="Metabolite")) %>% 
+              left_join(MetFlexMetabAnnotation, by="HMDB_ID") %>%
+              mutate(graph.order = rank(tTest.estimate), .by=c("diet")) %>%
+              group_by(diet) %>%
+              arrange(tTest.estimate) %>%
+              ungroup()
+
+
+
+
+# find the matches across diets
+dups <- unique(plot.data$metabolite[which(duplicated(plot.data$metabolite))])
+
+metab.match <- NULL
+
+for(i in dups){
+  indices <- grep(i, plot.data$metabolite)
+  
+  metab.match <- metab.match %>%
+                  bind_rows(as.data.frame(expand.grid(indices, indices)) %>% filter(Var1!=Var2))
+}
+
+# merge in ee and rq for each diet
+mean_ee_rq_by_diet <- phenotype.data %>% 
+                      summarise(meanEE = mean(M4EE),
+                                meanRQ = mean(MRQ),
+                                .by=DIET) %>%
+                      mutate(DIET = substr(DIET,1,2)) %>%
+                      rename(diet=DIET)
+
+plot.data <- plot.data %>% left_join(mean_ee_rq_by_diet)
+table(plot.data$diet)
+
+rm(i, indices)
+```
+
+
+
+
+```{r}
+# track height
+h <- 0.02
+
+pdf("MetFlex_circos.pdf", width = 18, height=12)
+plot.new()
+circle_size = unit(1, "snpc") # snpc unit gives you a square region
+
+pushViewport(viewport(x = 0, y = 0.5, width = circle_size, height = circle_size,
+    just = c("left", "center")))
+par(omi = gridOMI(), new = TRUE)
+
+# circos plot
+# bars for diet
+circos.par(gap.after = c(2, 2, 2, 2, 2, 2, 30))
+circos.heatmap(matrix(plot.data$diet.label, ncol = 1, dimnames = list(plot.data$metabolite, "diet.label")),
+               split = plot.data$diet.label,
+               col = col_diet,
+               track.height = h/2,
+               rownames.side = "outside")
+
+# add mean ee for each diet
+col_ee <- circlize::colorRamp2(c(min(plot.data$meanEE), max(plot.data$meanEE)), c("pink1", "purple"))
+circos.heatmap(matrix(plot.data$meanEE, ncol = 1, dimnames = list(plot.data$metabolite, "meanEE")),
+               split = plot.data$diet.label, #matrix(as.factor(plot.data$diet.label), ncol=1, list(plot.data$metabolite, "diet.label"))
+               col = col_ee,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = "mean EE"
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+            1:n - 0.5, cn, 
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add mean rq for each diet
+col_rq <- circlize::colorRamp2(c(min(plot.data$meanRQ),max(plot.data$meanRQ)), c("azure", "cadetblue"))
+circos.heatmap(matrix(plot.data$meanRQ, ncol = 1, dimnames = list(plot.data$metabolite, "meanRQ")),
+               split = plot.data$diet.label, #matrix(as.factor(plot.data$diet.label), ncol=1, list(plot.data$metabolite, "diet.label"))
+               col = col_rq,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = "mean RQ"
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+            1:n - 0.5, cn, 
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add log2 fc
+col_fc = colorRamp2(c(min(plot.data$tTest.estimate), 0, max(plot.data$tTest.estimate)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$tTest.estimate, ncol = 1, dimnames = list(plot.data$metabolite, "log2fc")),
+               split = plot.data$diet.label, #matrix(as.factor(plot.data$diet.label), ncol=1, list(plot.data$metabolite, "diet.label"))
+               col = col_fc,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(log[2]~FC)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+            1:n - 0.5, cn, 
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add beta coef on  EE
+col_betaM4EE = colorRamp2(c(min(plot.data$betaM4EE), 0, max(plot.data$betaM4EE)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$betaM4EE, ncol = 1, dimnames = list(plot.data$metabolite, "betaM4EE")),
+               split = plot.data$diet.label, 
+               col = col_betaM4EE,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(beta~`for`~EE)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+            1:n - 0.5, cn, 
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+
+# add beta coef on  RQ
+col_betaMRQ = colorRamp2(c(min(plot.data$betaMRQ), 0, max(plot.data$betaMRQ)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$betaMRQ, ncol = 1, dimnames = list(plot.data$metabolite, "betaMRQ")),
+               split = plot.data$diet.label,
+               col = col_betaMRQ,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(beta~`for`~RQ)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"),
+            1:n - 0.5, cn,
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add beta coef on delta CARBOX
+col_betaCARBOX = colorRamp2(c(min(plot.data$betaCARBOX), 0, max(plot.data$betaCARBOX)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$betaCARBOX, ncol = 1, dimnames = list(plot.data$metabolite, "betaCARBOX")),
+               split = plot.data$diet.label,
+               col = col_betaCARBOX,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(beta~`for`~CARBOX)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"),
+            1:n - 0.5, cn,
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add beta coef on delta LIPOX
+col_betaLIPOX = colorRamp2(c(min(plot.data$betaLIPOX), 0, max(plot.data$betaLIPOX)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$betaLIPOX, ncol = 1, dimnames = list(plot.data$metabolite, "betaLIPOX")),
+               split = plot.data$diet.label,
+               col = col_betaLIPOX,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(beta~`for`~LIPOX)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"),
+            1:n - 0.5, cn,
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add beta coef on delta PROTOX
+col_betaPROTOX = colorRamp2(c(min(plot.data$betaPROTOX), 0, max(plot.data$betaPROTOX)), c("blue", "white", "red"))
+circos.heatmap(matrix(plot.data$betaPROTOX, ncol = 1, dimnames = list(plot.data$metabolite, "betaPROTOX")),
+               split = plot.data$diet.label,
+               col = col_betaPROTOX,
+               track.height = h)
+# label
+circos.track(track.index = get.current.track.index(), panel.fun = function(x, y) {
+    if(CELL_META$sector.numeric.index == 7) { # the last sector
+        cn = expression(beta~`for`~PROTOX)
+        n = 1
+        circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"),
+            1:n - 0.5, cn,
+            cex = 0.5, adj = c(0, 0.5), facing = "inside")
+    }
+}, bg.border = NA)
+
+# add links
+for(i in seq_len(nrow(metab.match))) {
+    circos.heatmap.link(metab.match$Var1[i],
+                        metab.match$Var2[i],
+                        col = "grey")
+}
+
+rm(i)
+
+# generate a list of random colors for metabolite class
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+# set seed to make the color selection here reproducible
+set.seed(345)
+col_class <- sample(col_vector, length(unique(plot.data$class)))
+names(col_class) <- unique(plot.data$class)
+
+circos.heatmap(plot.data$class,
+               split = plot.data$diet.label,
+               col = col_class,
+               track.height = h/2)
+circos.clear()
+
+upViewport()
+
+h = dev.size()[2]
+
+# create circos plot legend
+lgd_meanEE <- Legend(title="mean energy expenditure", col_fun = col_ee, title_gp =gpar(fontface = "plain"))
+lgd_meanRQ <- Legend(title="mean respiratory quotient", col_fun = col_rq, title_gp =gpar(fontface = "plain"))
+lgd_fc = Legend(title = expression(log[2]~fold~change~(FC)), col_fun = col_fc)
+lgd_betaM4EE = Legend(title=expression(beta~on~metabolite~log[2]~FC~`for`~EE), col_fun = col_betaM4EE)
+lgd_betaMRQ = Legend(title=expression(beta~on~metabolite~log[2]~FC~`for`~RQ), col_fun = col_betaMRQ)
+lgd_betaCARBOX = Legend(title=expression(beta~on~metabolite~log[2]~FC~`for`~CARBOX), col_fun = col_betaCARBOX)
+lgd_betaLIPOX = Legend(title=expression(beta~on~metabolite~log[2]~FC~`for`~LIPOX), col_fun = col_betaLIPOX)
+lgd_betaPROTOX = Legend(title=expression(beta~on~metabolite~log[2]~FC~`for`~PROTOX), col_fun = col_betaPROTOX)
+
+lgd_diet = Legend(title = "Diet", at = names(col_diet), legend_gp = gpar(fill = col_diet), title_gp =gpar(fontface = "plain"))
+lgd_class = Legend(title = "Metabolite class", at=names(col_class), legend_gp = gpar(fill = col_class), title_gp =gpar(fontface = "plain"))
+
+lgd_list = packLegend(lgd_diet,
+                      lgd_meanEE,
+                      lgd_meanRQ,
+                      lgd_fc,
+                      lgd_betaM4EE,
+                      lgd_betaMRQ,
+                      lgd_betaCARBOX,
+                      lgd_betaLIPOX,
+                      lgd_betaPROTOX,
+                      
+                      lgd_class,
+                      max_height = unit(0.9*h, "inch"))
+circle_size = unit(1, "snpc")
+draw(lgd_list, x = circle_size, just = "left")
+
+dev.off()
+
+
+rm(h, circle_size, qual_col_pals, metab.match, list=ls()[grepl("lgd", ls())])
+```
+
+
+# Examine betas on diet from mixed models of EE/RQ/etc. to EE/RQ
+
+```{r}
+# EE
+temp <- delta.delta.nlme %>% 
+        filter(cov_str == "CS", Outcome=="M4EE") %>% 
+        select(Metabolite, Term, Value) %>% filter(grepl("Diet_code", Term)) %>% 
+        pivot_wider(names_from = Term, values_from = Value)
+
+Hmisc::hist.data.frame(temp[,-1])
+
+rm(temp)
+```
+
+
+```{r}
+rmarkdown::paged_table(mean_ee_rq_by_diet)
+```
+
+Now let's look at RQ
+```{r}
+temp <- delta.delta.nlme %>% 
+        filter(cov_str == "CS", Outcome=="MRQ") %>% 
+        select(Metabolite, Term, Value) %>% filter(grepl("Diet_code", Term)) %>% 
+        pivot_wider(names_from = Term, values_from = Value)
+
+Hmisc::hist.data.frame(temp[,-1])
+
+rm(temp)
+```
+
+
+
+# compare pre chamber and log2 fc metabolite betas from mixed models for ee/rq/etc.
+
+```{r, fig.height=5, fig.width=7}
+temp <- delta.delta.nlme %>% 
+        mutate(Term = case_when(grepl("_log2fc", Term) ~ "log2fc",
+                                grepl("_A", Term) ~ "prechamber",
+                                .default = Term)) %>%
+        filter(Term %in% c("log2fc", "prechamber"), cov_str=="CS", Outcome %in% c("M4EE", "MRQ")) %>%
+        select(Metabolite, Term, Value, fdr, new.outcome) %>%
+        mutate(Term2 = Term) %>%
+        pivot_wider(names_from = c("Term"), names_prefix = "beta_", values_from = Value) %>%
+        pivot_wider(names_from = c("Term2"), names_prefix = "fdr_", values_from = fdr) %>%
+        left_join(plotting.classes, by=c("Metabolite"="metabolite")) %>%
+        mutate(beta_log2fc = sum(beta_log2fc, na.rm = TRUE),
+               beta_prechamber = sum(beta_prechamber, na.rm = TRUE),
+               fdr_log2fc = sum(fdr_log2fc, na.rm = TRUE),
+               fdr_prechamber = sum(fdr_prechamber, na.rm = TRUE),
+               .by=c("Metabolite", "new.outcome")) %>%
+        distinct()
+
+
+ggplot(temp, aes(beta_prechamber, beta_log2fc)) +
+  geom_point(aes(col=new.class), alpha = ifelse(temp$fdr_prechamber<0.05 & temp$fdr_log2fc<0.05, 1, 0.3)) +
+  scale_color_manual(values = metabolite.class.colors) +
+  theme_bw() + 
+  facet_wrap(~new.outcome, scales = "free") +
+  ggpubr::stat_cor(cor.coef.name = "rho", method = "spearman") +
+  ggrepel::geom_text_repel(aes(label = ifelse(fdr_prechamber<0.05 & fdr_log2fc<0.05, Metabolite, "")), size = 2) +
+  labs(subtitle = "Comparison of beta on prechamber and log2fc metabolite from mixed models",
+       x = expression(beta~on~pre-chamber~metabolite~`for`~the~physiology~measure),
+       y = expression(beta~on~log[2]~fold~change~metabolite~`for`~the~physiology~measure)) +
+  theme(strip.background = element_rect(color = "black",
+                                        fill = "white"),
+        legend.position = "bottom") +
+  guides(color = guide_legend(title = "Metabolite class"))
+ggsave("prechamber_log2fc_beta_compare_nlme.pdf", height = 7, width = 10)
+
+rm(temp)
+```
+
+
+# Heatmap of the log2 fold change
+
+rows are diet
+cols are metabolites
+cluster it
+
+```{r}
+estimate.wide <- t.testResult %>%
+                  mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                                diet=="FS"~"24-hr fasting",
+                                                diet=="CN"~"High-carbohydrate",
+                                                diet=="FN"~"High-fat",
+                                                diet=="LP"~"Low-protein",
+                                                diet=="HP"~"High-protein",
+                                                diet=="EU" ~ "Energy balance")) %>%
+                  select(metabolite, diet.label, estimate) %>%
+                  pivot_wider(names_from = metabolite, values_from = estimate)
+
+
+pval.wide <- t.testResult %>% 
+                  mutate(diet.label = case_when(diet=="BO"~"Balanced overfeeding",
+                                                diet=="FS"~"24-hr fasting",
+                                                diet=="CN"~"High-carbohydrate",
+                                                diet=="FN"~"High-fat",
+                                                diet=="LP"~"Low-protein",
+                                                diet=="HP"~"High-protein",
+                                                diet=="EU" ~ "Energy balance")) %>%
+                  select(metabolite, diet.label, pval) %>%
+                  pivot_wider(names_from = metabolite, values_from = pval)
+
+# EE and RQ annotation data
+
+RQ <- phenotype.data %>% 
+      select(NIH, DIET, MRQ) %>% 
+      distinct() %>% 
+      summarise(mean.diet.RQ = mean(MRQ), .by=DIET) %>%
+      mutate(diet.label = case_when(substr(DIET, 1,2)=="BO"~"Balanced overfeeding",
+                                                substr(DIET, 1,2)=="FS"~"24-hr fasting",
+                                                substr(DIET, 1,2)=="CN"~"High-carbohydrate",
+                                                substr(DIET, 1,2)=="FN"~"High-fat",
+                                                substr(DIET, 1,2)=="LP"~"Low-protein",
+                                                substr(DIET, 1,2)=="HP"~"High-protein",
+                                                substr(DIET, 1,2)=="EU" ~ "Energy balance"))
+
+RQ.mat <- as.matrix(RQ$mean.diet.RQ)
+rownames(RQ.mat) <- RQ$diet.label
+RQ.mat <- RQ.mat[estimate.wide$diet.label,]
+
+EE <- phenotype.data %>% 
+      select(NIH, DIET, M4EE) %>% 
+      distinct() %>% 
+      summarise(mean.diet.EE = mean(M4EE), .by=DIET) %>%
+      mutate(diet.label = case_when(substr(DIET, 1,2)=="BO"~"Balanced overfeeding",
+                                                substr(DIET, 1,2)=="FS"~"24-hr fasting",
+                                                substr(DIET, 1,2)=="CN"~"High-carbohydrate",
+                                                substr(DIET, 1,2)=="FN"~"High-fat",
+                                                substr(DIET, 1,2)=="LP"~"Low-protein",
+                                                substr(DIET, 1,2)=="HP"~"High-protein",
+                                                substr(DIET, 1,2)=="EU" ~ "Energy balance"))
+
+EE.mat <- as.matrix(EE$mean.diet.EE)
+rownames(EE.mat) <- EE$diet.label
+EE.mat <- EE.mat[estimate.wide$diet.label,]
+
+
+mat <- as.matrix(estimate.wide[,-1])
+rownames(mat) <- estimate.wide$diet.label
+
+p.mat <- as.matrix(pval.wide[,-1])
+rownames(p.mat) <- pval.wide$diet.label
+
+hmdb <- data.frame(Metabolite = colnames(mat))
+hmdb <- hmdb %>% left_join(MetFlex_Metabolite_Dictionary) %>% left_join(plotting.classes)
+# hmdb$class[is.na(hmdb$class)] <- "No HMDB class"
+
+col_ee <- circlize::colorRamp2(c(min(EE.mat), max(EE.mat)),
+                               c("pink1", "purple"))
+
+col_rq <- circlize::colorRamp2(c(min(RQ.mat),max(RQ.mat)),
+                               c("azure", "cadetblue"))
+
+
+row_annotation <- HeatmapAnnotation(EE = EE.mat,
+                                    RQ = RQ.mat,
+                                    which = "row",
+                                    col = list(EE = col_ee,
+                                               RQ = col_rq),
+                                    annotation_legend_param = list(EE = list(title = "24-hr energy expenditure (EE)",
+                                                                             legend_direction = "vertical",
+                                                                             title_position = "topleft",
+                                                                             title_gp =gpar(fontsize=8, fontface = "plain"),
+                                                                             legend_width = unit(3, "cm")),
+                                                                   RQ = list(title = "Respiratory quotient (RQ)",
+                                                                             legend_direction = "vertical",
+                                                                             title_position = "topleft",
+                                                                             title_gp = gpar(fontsize=8, fontface = "plain"),
+                                                                             legend_width = unit(3, "cm"))),
+                                    annotation_name_side = "top")
+
+
+col_annotation <- HeatmapAnnotation(class = hmdb$new.class,
+                                    annotation_label = "Metabolite class",
+                                    col = list(class = metabolite.class.colors),
+                                    annotation_legend_param = list(title = "Metabolite class",
+                                                                   title_gp = gpar(fontsize=8, fontface = "plain")))
+
+pdf("MetFlex_log2fc_heatmap.pdf", height = 3, width=12)
+draw(
+Heatmap(mat,
+        name = "log2 FC metabolite",
+        show_column_names = FALSE,
+        clustering_method_rows = "ward.D2",
+        clustering_method_columns =  "ward.D2",
+        show_column_dend = FALSE,
+        bottom_annotation = col_annotation,
+        right_annotation = row_annotation,
+        heatmap_legend_param = list(title = expression(mean~log[2]~fold~change),
+                                    direction = "vertical",
+                                    title_position = "topleft")
+        ),
+  heatmap_legend_side = "right",
+  merge_legend = TRUE
+)
+dev.off()
+
+
+rm(estimate.wide, pval.wide, RQ, EE, RQ.mat, EE.mat, hmdb, col_ee, col_rq, mat, p.mat, row_annotation, col_annotation)
+```
+
+
+
+# Save output
+```{r}
+readr::write_csv(file = "MetFlex_Metabolite_Dictionary.csv",
+                 x=MetFlex_Metabolite_Dictionary %>% 
+                   left_join(MetFlexMetabAnnotation %>% select(!name), by="HMDB_ID"))
+
+
+save.image(file = "MetFlex_Analysis.Rdata")
+outputFilesToMd5 <- c(outputFilesToMd5, "MetFlex_Analysis.Rdata")
+
+knitr::kable(data.frame(
+  File=basename(outputFilesToMd5),
+  md5=tools::md5sum(outputFilesToMd5)
+))
+
+
+sessionInfo()
+```
+
